@@ -1,0 +1,86 @@
+name: Sync Upstream & Build Docker Image
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cli-proxy-api-plus
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync with upstream
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPIPlus.git 2>/dev/null || true
+          git fetch upstream main --tags
+
+          UPSTREAM_HEAD=$(git rev-parse upstream/main)
+          FORK_BASE=$(git merge-base HEAD upstream/main)
+
+          if [ "$UPSTREAM_HEAD" = "$FORK_BASE" ]; then
+            echo "Already up to date with upstream"
+            echo "synced=false" >> $GITHUB_OUTPUT
+          else
+            echo "Merging upstream changes..."
+            if git merge upstream/main --no-edit; then
+              echo "Merge successful"
+              git push origin main
+              echo "synced=true" >> $GITHUB_OUTPUT
+            else
+              echo "Merge conflict detected - attempting automatic resolution"
+              git merge --abort
+              echo "synced=false" >> $GITHUB_OUTPUT
+              echo "::warning::Merge conflict with upstream. Manual resolution required."
+            fi
+          fi
+
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate build metadata
+        run: |
+          echo "VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> $GITHUB_ENV
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+
+      - name: Build and push ARM64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          tags: |
+            ${{ env.DOCKERHUB_REPO }}:latest
+            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -4,6 +4,8 @@
 package gemini
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
@@ -11,6 +13,12 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func generateToolID() string {
+	b := make([]byte, 12)
+	rand.Read(b)
+	return "toolu_" + hex.EncodeToString(b)
+}
 
 // ConvertGeminiRequestToGemini normalizes Gemini v1beta requests.
 //   - Adds a default role for each content if missing or invalid.
@@ -76,13 +84,50 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		return true
 	})
 
+	// Track tool IDs by (functionName, callIndex) so multiple calls to the
+	// same function each get their own unique ID that responses can match.
+	type callKey struct {
+		name  string
+		index int
+	}
+	callCount := make(map[string]int)
+	toolIDMap := make(map[callKey]string)
+	respCount := make(map[string]int)
+
 	gjson.GetBytes(out, "contents").ForEach(func(key, content gjson.Result) bool {
-		if content.Get("role").String() == "model" {
+		contentIdx := key.Int()
+		role := content.Get("role").String()
+
+		if role == "model" {
 			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
+				partIdx := partKey.Int()
 				if part.Get("functionCall").Exists() {
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
+					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", contentIdx, partIdx), "skip_thought_signature_validator")
+					if !part.Get("functionCall.id").Exists() || part.Get("functionCall.id").String() == "" {
+						funcName := part.Get("functionCall.name").String()
+						toolID := generateToolID()
+						n := callCount[funcName]
+						callCount[funcName] = n + 1
+						toolIDMap[callKey{funcName, n}] = toolID
+						out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.functionCall.id", contentIdx, partIdx), toolID)
+					}
 				} else if part.Get("thoughtSignature").Exists() {
-					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()), "skip_thought_signature_validator")
+					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", contentIdx, partIdx), "skip_thought_signature_validator")
+				}
+				return true
+			})
+		} else if role == "user" {
+			content.Get("parts").ForEach(func(partKey, part gjson.Result) bool {
+				partIdx := partKey.Int()
+				if part.Get("functionResponse").Exists() {
+					if !part.Get("functionResponse.id").Exists() || part.Get("functionResponse.id").String() == "" {
+						funcName := part.Get("functionResponse.name").String()
+						n := respCount[funcName]
+						respCount[funcName] = n + 1
+						if id, ok := toolIDMap[callKey{funcName, n}]; ok {
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.parts.%d.functionResponse.id", contentIdx, partIdx), id)
+						}
+					}
 				}
 				return true
 			})
