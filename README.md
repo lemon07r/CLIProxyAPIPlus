@@ -4,6 +4,8 @@ English | [Chinese](README_CN.md)
 
 This fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) is a specialized version that resolves critical tool-calling and schema compatibility issues when using Google's Gemini v1beta API (like when trying to use claude models in openacode with the v1beta endpoint and @ai-sdk/google).
 
+There are automated docker builds that stay updated from upstream available for arm64 systems available here: https://hub.docker.com/r/lemon07r/cli-proxy-api-plus/tags
+
 > [!IMPORTANT]
 > **Current Build Status:** This fork currently pushes Docker images for **`linux/arm64`** (Apple Silicon, Raspberry Pi, etc.) every 6 hours. If you need **AMD64** support, see the [Enabling AMD64 Support](#enabling-amd64-support) section below.
 
