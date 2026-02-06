@@ -6,6 +6,8 @@
 package gemini
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -15,6 +17,12 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func generateToolID() string {
+	b := make([]byte, 12)
+	rand.Read(b)
+	return "toolu_" + hex.EncodeToString(b)
+}
 
 // ConvertGeminiRequestToAntigravity parses and transforms a Gemini CLI API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -96,6 +104,55 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 		}
 	}
+
+	// Inject tool IDs for functionCall/functionResponse parts that are missing them.
+	// Antigravity's Claude backend requires tool_use.id but Gemini clients (e.g. @ai-sdk/google) don't send it.
+	type callKey struct {
+		name  string
+		index int
+	}
+	callCount := make(map[string]int)
+	toolIDMap := make(map[callKey]string)
+	respCount := make(map[string]int)
+
+	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
+		role := content.Get("role").String()
+		if role == "model" {
+			content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
+				if part.Get("functionCall").Exists() {
+					if !part.Get("functionCall.id").Exists() || part.Get("functionCall.id").String() == "" {
+						funcName := part.Get("functionCall.name").String()
+						toolID := generateToolID()
+						n := callCount[funcName]
+						callCount[funcName] = n + 1
+						toolIDMap[callKey{funcName, n}] = toolID
+						rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.functionCall.id", contentIdx.Int(), partIdx.Int()), toolID)
+					} else {
+						funcName := part.Get("functionCall.name").String()
+						n := callCount[funcName]
+						callCount[funcName] = n + 1
+						toolIDMap[callKey{funcName, n}] = part.Get("functionCall.id").String()
+					}
+				}
+				return true
+			})
+		} else if role == "user" || role == "function" {
+			content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
+				if part.Get("functionResponse").Exists() {
+					if !part.Get("functionResponse.id").Exists() || part.Get("functionResponse.id").String() == "" {
+						funcName := part.Get("functionResponse.name").String()
+						n := respCount[funcName]
+						respCount[funcName] = n + 1
+						if id, ok := toolIDMap[callKey{funcName, n}]; ok {
+							rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.functionResponse.id", contentIdx.Int(), partIdx.Int()), id)
+						}
+					}
+				}
+				return true
+			})
+		}
+		return true
+	})
 
 	// Gemini-specific handling for non-Claude models:
 	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
