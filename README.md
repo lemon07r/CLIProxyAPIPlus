@@ -1,17 +1,47 @@
-Fork of CLIProxyAPIPlus with patch for antigravity claude models to gemini format. This adds toolcall id's, to work with google's ai sdk properly. Not sure why the original maintainers refuse to fix this and close issues as working as intended. 
-This fork stays up to date with upstream, and pushes docker builds every update, but currently only compiles for arm64. I suggest forking and adjusting it for amd64 if needed. 
-
-
-# CLIProxyAPI Plus
+# CLIProxyAPI Plus (Gemini-Fix Fork)
 
 English | [Chinese](README_CN.md)
 
-This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
+This fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) is a specialized version that resolves critical tool-calling and schema compatibility issues when using Google's Gemini v1beta API (like when trying to use claude models in openacode with the v1beta endpoint and @ai-sdk/google).
 
-All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
+> [!IMPORTANT]
+> **Current Build Status:** This fork currently pushes Docker images for **`linux/arm64`** (Apple Silicon, Raspberry Pi, etc.) every 6 hours. If you need **AMD64** support, see the [Enabling AMD64 Support](#enabling-amd64-support) section below.
 
-The Plus release stays in lockstep with the mainline features.
+## Why this fork?
 
+The upstream repository has persistent issues when translating Claude/OpenAI tool calls into Gemini's native format. This fork implements a "Protocol Fix" that allows Google AI SDKs to work seamlessly with proxied third-party models.
+
+### The "Gemini SDK" Compatibility Fix
+This fork includes a critical patch for using Claude models (via Antigravity/other providers) with tools through the Gemini-compatible endpoint. The original implementation often caused failures in Google AI SDKs (like `@ai-sdk/google`).
+
+**What this fork fixes:**
+-   **Tool Call IDs:** Injects required unique `tool_call_id` fields (e.g., `toolu_...`) into the translation layer. Google's SDK strictly requires these to match function calls with their responses.
+-   **Sequential Matching:** Implements a FIFO queue logic to correctly pair asynchronous function responses with their original calls in the conversation history.
+-   **Strict Schema Cleaning:** Automatically strips unsupported JSON Schema keywords (like `$schema`, `const`, and `$ref`) from tool definitions that otherwise cause the Gemini API to return a 400 Bad Request.
+-   **Role Normalization:** Ensures conversation history strictly alternates between `user` and `model` roles, preventing "invalid argument" errors common in the strict Gemini v1beta API.
+
+---
+
+## Enabling AMD64 Support
+
+To build this fork for your own Intel/AMD x86_64 systems, follow these steps:
+
+1.  **Fork this repository** to your own account.
+2.  Edit `.github/workflows/build-and-push.yml` in your fork:
+    *   Change `runs-on: ubuntu-24.04-arm` to `runs-on: ubuntu-latest`.
+    *   Add the QEMU setup step before Docker Buildx:
+        ```yaml
+        - name: Set up QEMU
+          uses: docker/setup-qemu-action@v3
+        ```
+    *   Update the `platforms` line in the build step:
+        ```yaml
+        platforms: linux/amd64
+        ```
+3.  Commit the changes. GitHub Actions will now build a 64-bit x86 image for you.
+
+---
+  
 ## Differences from the Mainline
 
 - Added GitHub Copilot support (OAuth login), provided by [em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
