@@ -1,3 +1,7 @@
+Fork of CLIProxyAPIPlus with patch for antigravity claude models to gemini format. This adds toolcall id's, to work with google's ai sdk properly. Not sure why the original maintainers refuse to fix this and close issues as working as intended. 
+This fork stays up to date with upstream, and pushes docker builds every update, but currently only compiles for arm64. I suggest forking and adjusting it for amd64 if needed. 
+
+
 # CLIProxyAPI Plus
 
 English | [Chinese](README_CN.md)
