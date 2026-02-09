@@ -1,0 +1,46 @@
+From: CLI Proxy Custom Patches
+Subject: [PATCH 004] Fix thinking signature for Claude models via Antigravity
+
+When Claude models are accessed through the Gemini v1beta endpoint and routed
+to Antigravity, thinking blocks from previous conversation turns lack the
+required `thinking.signature` field. The existing skip_thought_signature_validator
+sentinel was only applied for non-Claude models, but Claude's backend now
+validates this field in multi-turn conversations with tool use.
+
+This patch removes the `if !strings.Contains(modelName, "claude")` guard
+so that the skip sentinel is applied for ALL models, including Claude.
+
+Key changes:
+- Remove the non-Claude model guard for thoughtSignature sentinel injection
+- Remove unused "strings" import
+- Apply skip_thought_signature_validator to thinking blocks and functionCall
+  parts for all models routed through the Antigravity Gemini translator
+
+---
+diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+@@ -9,7 +9,6 @@ import (
+ 	"crypto/rand"
+ 	"encoding/hex"
+ 	"fmt"
+-	"strings"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+@@ -154,10 +153,11 @@
+ 		return true
+ 	})
+ 
+-	// Gemini-specific handling for non-Claude models:
+-	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
+-	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
+-	if !strings.Contains(modelName, "claude") {
++	// Add skip_thought_signature_validator to functionCall and thinking parts so upstream
++	// can bypass signature validation. Required for all models including Claude, as thinking
++	// blocks from previous conversation turns may lack valid signatures when sent back via
++	// the Gemini v1beta endpoint.
++	{
+ 		const skipSentinel = "skip_thought_signature_validator"
+ 
+ 		gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
