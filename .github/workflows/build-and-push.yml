@@ -6,6 +6,13 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - 'patches/**'
+      - 'Dockerfile'
+      - '.github/workflows/build-and-push.yml'
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
 
 env:
   DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cli-proxy-api-plus
@@ -53,6 +60,24 @@ jobs:
 
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: List patches to be applied
+        run: |
+          echo "=== Custom patches to be applied during build ==="
+          if [ -d patches ]; then
+            ls -la patches/
+            echo ""
+            for patch in patches/*.patch; do
+              if [ -f "$patch" ]; then
+                echo "--- $patch ---"
+                head -15 "$patch"
+                echo "..."
+                echo ""
+              fi
+            done
+          else
+            echo "No patches directory found"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

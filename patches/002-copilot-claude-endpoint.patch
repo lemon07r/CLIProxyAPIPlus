@@ -1,0 +1,63 @@
+From: CLI Proxy Custom Patches
+Subject: [PATCH 002] Add Copilot Claude Endpoint Support
+
+This patch adds support for routing Claude models through GitHub Copilot's
+native /v1/messages endpoint. This enables proper Claude API format handling.
+
+Key changes:
+- Add githubCopilotMessagesPath constant for /v1/messages endpoint
+- Add isCopilotClaudeModel() helper to detect Claude models
+- Add isCopilotClaudeModelFromBody() helper for body inspection
+- Add getGitHubCopilotEndpointPath() for endpoint routing
+- Add anthropic-beta header for Claude model requests
+
+This patch should be applied AFTER 001-unlimited-copilot-headers.patch.
+
+---
+diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+--- a/internal/runtime/executor/github_copilot_executor.go
++++ b/internal/runtime/executor/github_copilot_executor.go
+@@ -26,6 +26,7 @@ const (
+ 	githubCopilotBaseURL       = "https://api.githubcopilot.com"
+ 	githubCopilotChatPath      = "/chat/completions"
+ 	githubCopilotResponsesPath = "/responses"
++	githubCopilotMessagesPath  = "/v1/messages"
+ 	githubCopilotAuthType      = "github-copilot"
+ 	githubCopilotTokenCacheTTL = 25 * time.Minute
+ 	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
+@@ -439,6 +440,35 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
+ 	// behavior and avoid detection of request patterns.
+ 	r.Header.Set("VScode-SessionId", uuid.NewString())
+ 	r.Header.Set("VScode-MachineId", uuid.NewString())
++	// Add anthropic-beta header for Claude model requests
++	if isCopilotClaudeModelFromBody(body) {
++		r.Header.Set("anthropic-beta", copilotThinkingBeta)
++	}
++}
++
++// isCopilotClaudeModel checks if the model is a Claude model that should use
++// the /v1/messages endpoint on GitHub Copilot.
++func isCopilotClaudeModel(model string) bool {
++	normalized := strings.TrimPrefix(model, "copilot-")
++	return strings.HasPrefix(normalized, "claude-")
++}
++
++// isCopilotClaudeModelFromBody attempts to detect if the request is for a Claude
++// model by examining the model field in the request body.
++func isCopilotClaudeModelFromBody(body []byte) bool {
++	if len(body) == 0 {
++		return false
++	}
++	model := gjson.GetBytes(body, "model").String()
++	return isCopilotClaudeModel(model)
++}
++
++// getGitHubCopilotEndpointPath returns the appropriate endpoint path based on model.
++func getGitHubCopilotEndpointPath(model string) string {
++	if isCopilotClaudeModel(model) {
++		return githubCopilotMessagesPath
++	}
++	return githubCopilotChatPath
+ }
+ 
+ // detectVisionContent checks if the request body contains vision/image content.
