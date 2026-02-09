@@ -1,8 +1,8 @@
 From: CLI Proxy Custom Patches
-Subject: [PATCH 002] Add Copilot Claude Endpoint Support
+Subject: [PATCH 002] Add Copilot Claude Endpoint and Thinking Support
 
 This patch adds support for routing Claude models through GitHub Copilot's
-native /v1/messages endpoint. This enables proper Claude API format handling.
+native /v1/messages endpoint and enables thinking/reasoning capabilities.
 
 Key changes:
 - Add githubCopilotMessagesPath constant for /v1/messages endpoint
@@ -10,6 +10,10 @@ Key changes:
 - Add isCopilotClaudeModelFromBody() helper for body inspection
 - Add getGitHubCopilotEndpointPath() for endpoint routing
 - Add anthropic-beta header for Claude model requests
+- Add copilotClaudeSupportsThinking() to detect thinking-capable models
+- Add normalizeCopilotClaudeThinking() to process thinking parameters
+- Add normalizeThinkingBudget() for budget clamping (min 1024, max 128000)
+- Integrate thinking normalization into Execute and ExecuteStream flows
 
 This patch should be applied AFTER 001-unlimited-copilot-headers.patch.
 
@@ -25,7 +29,41 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	githubCopilotAuthType      = "github-copilot"
  	githubCopilotTokenCacheTTL = 25 * time.Minute
  	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
-@@ -439,6 +440,35 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
+@@ -37,6 +38,14 @@ const (
+ 	copilotAPIVersion    = "2025-10-01"
+ 	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
++
++	// Claude thinking budget constraints.
++	// These values are based on Anthropic's documented limits for extended thinking.
++	copilotClaudeMinThinkingBudget     = 1024
++	copilotClaudeMaxThinkingBudget     = 128000
++	copilotClaudeDefaultThinkingBudget = 10000
++	// Default max_tokens if not specified in request (for thinking-enabled requests).
++	copilotClaudeDefaultMaxTokens      = 16000
+ )
+
+ // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
+@@ -80,6 +89,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
+ 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
+ 	body = e.normalizeModel(req.Model, body)
+ 	body = applyPayloadConfig(e.cfg, req.Model, body)
++	if isCopilotClaudeModel(req.Model) {
++		body = normalizeCopilotClaudeThinking(req.Model, body)
++	}
+ 	body, _ = sjson.SetBytes(body, "stream", false)
+
+ 	url := githubCopilotBaseURL + githubCopilotChatPath
+@@ -155,6 +167,9 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
+ 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+ 	body = e.normalizeModel(req.Model, body)
+ 	body = applyPayloadConfig(e.cfg, req.Model, body)
++	if isCopilotClaudeModel(req.Model) {
++		body = normalizeCopilotClaudeThinking(req.Model, body)
++	}
+ 	body, _ = sjson.SetBytes(body, "stream", true)
+ 	// Enable stream options for usage stats in stream
+ 	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+@@ -439,6 +454,100 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
  	// behavior and avoid detection of request patterns.
  	r.Header.Set("VScode-SessionId", uuid.NewString())
  	r.Header.Set("VScode-MachineId", uuid.NewString())
@@ -58,6 +96,77 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		return githubCopilotMessagesPath
 +	}
 +	return githubCopilotChatPath
++}
++
++// copilotClaudeSupportsThinking checks if the Claude model supports extended thinking.
++// Currently supported: claude-sonnet-4, claude-3.5-sonnet, claude-3-7-sonnet variants.
++func copilotClaudeSupportsThinking(model string) bool {
++	normalized := strings.ToLower(strings.TrimPrefix(model, "copilot-"))
++	// Claude Sonnet 4 and 3.5/3.7 Sonnet models support thinking
++	return strings.Contains(normalized, "sonnet-4") ||
++		strings.Contains(normalized, "3-5-sonnet") ||
++		strings.Contains(normalized, "3.5-sonnet") ||
++		strings.Contains(normalized, "3-7-sonnet") ||
++		strings.Contains(normalized, "3.7-sonnet")
++}
++
++// normalizeCopilotClaudeThinking processes thinking parameters for Claude models.
++// It ensures thinking budget is within valid bounds and max_tokens is set appropriately.
++func normalizeCopilotClaudeThinking(model string, body []byte) []byte {
++	if !copilotClaudeSupportsThinking(model) {
++		// Remove thinking config for models that don't support it
++		if updated, err := sjson.DeleteBytes(body, "thinking"); err == nil {
++			return updated
++		}
++		return body
++	}
++
++	thinking := gjson.GetBytes(body, "thinking")
++	if !thinking.Exists() {
++		return body
++	}
++
++	thinkingType := strings.ToLower(strings.TrimSpace(thinking.Get("type").String()))
++	if thinkingType == "disabled" {
++		// Respect explicit disable
++		return body
++	}
++
++	// Ensure max_tokens is set (required for thinking)
++	maxTokens := gjson.GetBytes(body, "max_tokens")
++	maxVal := int(maxTokens.Int())
++	if maxVal <= 0 {
++		maxVal = copilotClaudeDefaultMaxTokens
++		body, _ = sjson.SetBytes(body, "max_tokens", maxVal)
++	}
++
++	// Get and normalize budget
++	budgetVal := int(thinking.Get("budget_tokens").Int())
++	if budgetVal <= 0 {
++		budgetVal = copilotClaudeDefaultThinkingBudget
++	}
++	normalized := normalizeThinkingBudget(budgetVal)
++
++	// Ensure budget is less than max_tokens
++	if normalized >= maxVal {
++		normalized = maxVal - 1
++	}
++
++	// Set thinking config
++	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
++	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", normalized)
++	return body
++}
++
++// normalizeThinkingBudget clamps the thinking budget to valid bounds.
++func normalizeThinkingBudget(budget int) int {
++	if budget < copilotClaudeMinThinkingBudget {
++		return copilotClaudeMinThinkingBudget
++	}
++	if budget > copilotClaudeMaxThinkingBudget {
++		return copilotClaudeMaxThinkingBudget
++	}
++	return budget
  }
- 
+
  // detectVisionContent checks if the request body contains vision/image content.
