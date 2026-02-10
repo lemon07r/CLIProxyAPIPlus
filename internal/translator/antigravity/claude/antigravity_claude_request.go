@@ -35,7 +35,6 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
-	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
 
 	// system instruction
@@ -134,11 +133,11 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						isUnsigned := !cache.HasValidSignature(modelName, signature)
 
 						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
+						// Thinking blocks from different models/sessions may lack valid signatures.
+						// Drop them silently without disabling thought translation for subsequent
+						// messages that may have valid signatures from the current backend.
 						if isUnsigned {
 							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
-							enableThoughtTranslate = false
 							continue
 						}
 
@@ -376,7 +375,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 
 	// Map Anthropic thinking -> Gemini thinkingBudget/include_thoughts when type==enabled
-	if t := gjson.GetBytes(rawJSON, "thinking"); enableThoughtTranslate && t.Exists() && t.IsObject() {
+	if t := gjson.GetBytes(rawJSON, "thinking"); t.Exists() && t.IsObject() {
 		if t.Get("type").String() == "enabled" {
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
