@@ -9,7 +9,7 @@ Automated Docker builds for arm64 are available here: https://hub.docker.com/r/l
 
 ### Patches
 
-### #001 - Copilot Premium Requests
+#### #001 - Copilot Premium Requests
 Updates GitHub Copilot executor headers for premium model requests. Sets `X-Initiator: agent` unconditionally, updates editor/plugin version strings, and adds per-request randomized session/machine IDs to mimic VSCode extension behavior.
 
 #### 002 - Copilot Claude Endpoint Support
