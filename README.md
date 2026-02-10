@@ -1,5 +1,7 @@
 # CLIProxyAPI Plus (Custom Patches Fork)
 
+English | [Chinese](README_CN.md)
+
 A fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with custom patches applied on top of upstream via automated Docker builds. Patches are maintained in the [`patches/`](patches/) directory and applied in order during the Docker build process, making it easy to stay in sync with upstream while carrying custom changes.
 
 Automated Docker builds for arm64 are available here: https://hub.docker.com/r/lemon07r/cli-proxy-api-plus/tags
@@ -7,15 +9,15 @@ Automated Docker builds for arm64 are available here: https://hub.docker.com/r/l
 > [!IMPORTANT]
 > **Current Build Status:** This fork syncs with upstream and pushes Docker images for **`linux/arm64`** (Apple Silicon, Raspberry Pi, etc.) every hour. If you need **AMD64** support, see the [Enabling AMD64 Support](#enabling-amd64-support) section below.
 
-### Patches
+## Patches
 
-#### 001 - Copilot Premium Requests
+### 001 - Copilot Premium Requests
 Updates GitHub Copilot executor headers for premium model requests. Sets `X-Initiator: agent` unconditionally, updates editor/plugin version strings, and adds per-request randomized session/machine IDs to mimic VSCode extension behavior.
 
-#### 002 - Copilot Claude Endpoint Support
+### 002 - Copilot Claude Endpoint Support
 Adds native Claude API support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Removes unsupported `stream_options` and skips OpenAI-specific content processing for Claude requests.
 
-#### 004 - Antigravity Claude Thinking Signature Fix
+### 004 - Antigravity Claude Thinking Signature Fix
 Extends the `skip_thought_signature_validator` sentinel injection to all models routed through the Antigravity Gemini translator, including Claude. The upstream code only applied this to non-Claude models, which caused thinking signature validation failures in multi-turn conversations with tool use when using Claude thinking models via Antigravity.
 
 ---
