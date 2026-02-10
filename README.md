@@ -1,26 +1,22 @@
-# CLIProxyAPI Plus (Gemini-Fix Fork)
+# CLIProxyAPI Plus (Custom Patches Fork)
 
-English | [Chinese](README_CN.md)
+A fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with custom patches applied on top of upstream via automated Docker builds. Patches are maintained in the [`patches/`](patches/) directory and applied in order during the Docker build process, making it easy to stay in sync with upstream while carrying custom changes.
 
-This fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) is a specialized version that resolves critical tool-calling and schema compatibility issues when using Google's Gemini v1beta API (like when trying to use claude models in openacode with the v1beta endpoint and @ai-sdk/google).
-
-There are automated docker builds that stay updated from upstream available for arm64 systems available here: https://hub.docker.com/r/lemon07r/cli-proxy-api-plus/tags
+Automated Docker builds for arm64 are available here: https://hub.docker.com/r/lemon07r/cli-proxy-api-plus/tags
 
 > [!IMPORTANT]
-> **Current Build Status:** This fork currently pushes Docker images for **`linux/arm64`** (Apple Silicon, Raspberry Pi, etc.) every 6 hours. If you need **AMD64** support, see the [Enabling AMD64 Support](#enabling-amd64-support) section below.
+> **Current Build Status:** This fork syncs with upstream and pushes Docker images for **`linux/arm64`** (Apple Silicon, Raspberry Pi, etc.) every hour. If you need **AMD64** support, see the [Enabling AMD64 Support](#enabling-amd64-support) section below.
 
-## Why this fork?
+## Patches
 
-The upstream repository has persistent issues when translating Claude/OpenAI tool calls into Gemini's native format. This fork implements a "Protocol Fix" that allows Google AI SDKs to work seamlessly with proxied third-party models.
+### 001 - Copilot Premium Requests
+Updates GitHub Copilot executor headers for premium model requests. Sets `X-Initiator: agent` unconditionally, updates editor/plugin version strings, and adds per-request randomized session/machine IDs to mimic VSCode extension behavior.
 
-### The "Gemini SDK" Compatibility Fix
-This fork includes a critical patch for using Claude models (via Antigravity/other providers) with tools through the Gemini-compatible endpoint. The original implementation often caused failures in Google AI SDKs (like `@ai-sdk/google`).
+### 002 - Copilot Claude Endpoint Support
+Adds native Claude API support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Removes unsupported `stream_options` and skips OpenAI-specific content processing for Claude requests.
 
-**What this fork fixes:**
--   **Tool Call IDs:** Injects required unique `tool_call_id` fields (e.g., `toolu_...`) into the translation layer. Google's SDK strictly requires these to match function calls with their responses.
--   **Sequential Matching:** Implements a FIFO queue logic to correctly pair asynchronous function responses with their original calls in the conversation history.
--   **Strict Schema Cleaning:** Automatically strips unsupported JSON Schema keywords (like `$schema`, `const`, and `$ref`) from tool definitions that otherwise cause the Gemini API to return a 400 Bad Request.
--   **Role Normalization:** Ensures conversation history strictly alternates between `user` and `model` roles, preventing "invalid argument" errors common in the strict Gemini v1beta API.
+### 004 - Antigravity Claude Thinking Signature Fix
+Extends the `skip_thought_signature_validator` sentinel injection to all models routed through the Antigravity Gemini translator, including Claude. The upstream code only applied this to non-Claude models, which caused thinking signature validation failures in multi-turn conversations with tool use when using Claude thinking models via Antigravity.
 
 ---
 
@@ -43,6 +39,8 @@ To build this fork for your own Intel/AMD x86_64 systems, follow these steps:
 3.  Commit the changes. GitHub Actions will now build a 64-bit x86 image for you.
 
 ---
+
+# Original README
   
 ## Differences from the Mainline
 
