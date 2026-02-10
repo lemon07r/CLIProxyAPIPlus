@@ -1,34 +1,30 @@
 From: CLI Proxy Custom Patches
-Subject: [PATCH 004] Fix thinking signature for Claude models via Antigravity
+Subject: [PATCH 004] Fix thinking signature handling for all models via Antigravity Gemini translator
 
-When Claude models are accessed through the Gemini v1beta endpoint and routed
-to Antigravity, thinking blocks from previous conversation turns lack the
-required `thinking.signature` field. The existing skip_thought_signature_validator
-sentinel was only applied for non-Claude models, but Claude's backend now
-validates this field in multi-turn conversations with tool use.
+When models are accessed through the Gemini v1beta endpoint and routed to
+Antigravity, thinking blocks from previous conversation turns may carry
+stale or cross-provider signatures that cause validation failures.
 
-This patch removes the `if !strings.Contains(modelName, "claude")` guard
-so that the skip sentinel is applied for ALL models, including Claude.
+For Gemini models, the existing skip_thought_signature_validator sentinel
+bypasses Google's signature validation. For Claude models, the sentinel is
+NOT recognized by Claude's API, so thinking blocks must be stripped entirely
+from previous assistant messages instead.
+
+This also cleans up both camelCase (thoughtSignature) and snake_case
+(thought_signature) signature fields, since clients like @ai-sdk/google
+may send either format.
 
 Key changes:
-- Remove the non-Claude model guard for thoughtSignature sentinel injection
-- Remove unused "strings" import
-- Apply skip_thought_signature_validator to thinking blocks and functionCall
-  parts for all models routed through the Antigravity Gemini translator
+- For non-Claude models: apply skip sentinel to thinking and functionCall
+  parts, also clear snake_case thought_signature to prevent passthrough
+- For Claude models: strip thinking blocks from previous assistant turns
+  and clear stale signatures from functionCall parts
 
 ---
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-@@ -9,7 +9,6 @@ import (
- 	"crypto/rand"
- 	"encoding/hex"
- 	"fmt"
--	"strings"
- 
- 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
- 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-@@ -154,10 +153,11 @@
+@@ -154,35 +154,51 @@
  		return true
  	})
  
@@ -36,11 +32,63 @@ diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.g
 -	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
 -	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
 -	if !strings.Contains(modelName, "claude") {
-+	// Add skip_thought_signature_validator to functionCall and thinking parts so upstream
-+	// can bypass signature validation. Required for all models including Claude, as thinking
-+	// blocks from previous conversation turns may lack valid signatures when sent back via
-+	// the Gemini v1beta endpoint.
++	// Handle thinking signatures for all models routed through Antigravity.
++	// For Gemini models: add skip_thought_signature_validator sentinel (Google honors it).
++	// For Claude models: strip thinking blocks entirely from previous assistant turns,
++	// because Claude rejects the sentinel as an invalid signature.
++	// Also clean up snake_case thought_signature to prevent stale cross-provider
++	// signatures from passing through to the upstream API.
++	isClaude := strings.Contains(modelName, "claude")
 +	{
  		const skipSentinel = "skip_thought_signature_validator"
  
  		gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
+ 			if content.Get("role").String() == "model" {
+-				// First pass: collect indices of thinking parts to mark with skip sentinel
+-				var thinkingIndicesToSkipSignature []int64
++				var thinkingIndicesToProcess []int64
+ 				content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
+-					// Collect indices of thinking blocks to mark with skip sentinel
+ 					if part.Get("thought").Bool() {
+-						thinkingIndicesToSkipSignature = append(thinkingIndicesToSkipSignature, partIdx.Int())
++						thinkingIndicesToProcess = append(thinkingIndicesToProcess, partIdx.Int())
+ 					}
+-					// Add skip sentinel to functionCall parts
+ 					if part.Get("functionCall").Exists() {
+-						existingSig := part.Get("thoughtSignature").String()
+-						if existingSig == "" || len(existingSig) < 50 {
+-							rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
++						basePath := fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), partIdx.Int())
++						if isClaude {
++							// Clear stale signatures from functionCall parts for Claude
++							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thoughtSignature")
++							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
++						} else {
++							existingSig := part.Get("thoughtSignature").String()
++							if existingSig == "" || len(existingSig) < 50 {
++								rawJSON, _ = sjson.SetBytes(rawJSON, basePath+".thoughtSignature", skipSentinel)
++							}
++							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
+ 						}
+ 					}
+ 					return true
+ 				})
+ 
+-				// Add skip_thought_signature_validator sentinel to thinking blocks in reverse order to preserve indices
+-				for i := len(thinkingIndicesToSkipSignature) - 1; i >= 0; i-- {
+-					idx := thinkingIndicesToSkipSignature[i]
+-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), idx), skipSentinel)
++				// Process thinking blocks in reverse order to preserve indices
++				for i := len(thinkingIndicesToProcess) - 1; i >= 0; i-- {
++					idx := thinkingIndicesToProcess[i]
++					basePath := fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), idx)
++					if isClaude {
++						// Strip thinking blocks for Claude - the sentinel is not a valid Claude signature
++						rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath)
++					} else {
++						rawJSON, _ = sjson.SetBytes(rawJSON, basePath+".thoughtSignature", skipSentinel)
++						rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
++					}
+ 				}
+ 			}
+ 			return true

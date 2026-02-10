@@ -17,8 +17,8 @@ Updates GitHub Copilot executor headers for premium model requests. Sets `X-Init
 ### 002 - Copilot Claude Endpoint Support
 Adds native Claude API support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Removes unsupported `stream_options` and skips OpenAI-specific content processing for Claude requests.
 
-### 004 - Antigravity Claude Thinking Signature Fix
-Extends the `skip_thought_signature_validator` sentinel injection to all models routed through the Antigravity Gemini translator, including Claude. The upstream code only applied this to non-Claude models, which caused thinking signature validation failures in multi-turn conversations with tool use when using Claude thinking models via Antigravity.
+### 004 - Antigravity Thinking Signature Fix
+Fixes thinking signature handling in the Antigravity Gemini translator for multi-turn conversations. For Gemini models, applies the `skip_thought_signature_validator` sentinel. For Claude models, strips thinking blocks from previous assistant turns instead (Claude rejects the sentinel as an invalid signature). Also cleans up snake_case `thought_signature` fields that clients like `@ai-sdk/google` may send, preventing stale cross-provider signatures from passing through.
 
 ---
 
