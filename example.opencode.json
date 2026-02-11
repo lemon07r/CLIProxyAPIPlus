@@ -1,0 +1,177 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [],
+  "provider": {
+    "cliproxy-codex": {
+      "name": "CLI Proxy (Codex)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "codex-gpt-5.2": {
+          "id": "codex-gpt-5.2",
+          "name": "GPT-5.2 (Codex)",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "codex-gpt-5.3-codex": {
+          "id": "codex-gpt-5.3-codex",
+          "name": "GPT-5.3 Codex (Codex)",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    },
+    "cliproxy-copilot": {
+      "name": "CLI Proxy (GitHub Copilot)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "copilot-claude-opus-4.6": {
+          "id": "copilot-claude-opus-4.6",
+          "name": "Claude Opus 4.6 (Copilot)",
+          "reasoning": true,
+          "limit": {
+            "context": 128000,
+            "output": 64000
+          }
+        },
+        "copilot-gemini-3-pro-preview": {
+          "id": "copilot-gemini-3-pro-preview",
+          "name": "Gemini 3 Pro Preview (Copilot)",
+          "reasoning": true,
+          "limit": {
+            "context": 109000,
+            "output": 64000
+          }
+        },
+        "copilot-gemini-3-flash-preview": {
+          "id": "copilot-gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview (Copilot)",
+          "reasoning": true,
+          "limit": {
+            "context": 109000,
+            "output": 64000
+          }
+        }
+      }
+    },
+    "cliproxy-copilot-gpt": {
+      "name": "CLI Proxy (Copilot GPT /responses)",
+      "npm": "@ai-sdk/openai",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "gpt-5.2": {
+          "id": "gpt-5.2",
+          "name": "GPT-5.2 (Copilot /responses)",
+          "reasoning": true,
+          "limit": {
+            "context": 128000,
+            "output": 64000
+          }
+        },
+        "gpt-5.2-codex": {
+          "id": "gpt-5.2-codex",
+          "name": "GPT-5.2 Codex (Copilot /responses)",
+          "reasoning": true,
+          "limit": {
+            "context": 272000,
+            "output": 128000
+          }
+        }
+      }
+    },
+    "cliproxy-kimi": {
+      "name": "CLI Proxy (Kimi)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "kimi-k2.5": {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          }
+        }
+      }
+    },
+    "cliproxy-antigravity": {
+      "name": "CLI Proxy (Antigravity)",
+      "npm": "@ai-sdk/google",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1beta",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "gemini-3-pro-high": {
+          "id": "gemini-3-pro-high",
+          "name": "Gemini 3 Pro High (Antigravity)",
+          "reasoning": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
+        },
+        "gemini-3-pro-image": {
+          "id": "gemini-3-pro-image",
+          "name": "Gemini 3 Pro Image (Antigravity)",
+          "reasoning": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
+        },
+        "gemini-3-flash": {
+          "id": "gemini-3-flash",
+          "name": "Gemini 3 Flash (Antigravity)",
+          "reasoning": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          }
+        },
+        "gemini-3-claude-opus-4-6-thinking": {
+          "id": "gemini-3-claude-opus-4-6-thinking",
+          "name": "Claude Opus 4.6 Thinking (AG)",
+          "reasoning": true,
+          "modalities": {
+            "input": ["text", "image", "pdf"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          }
+        }
+      }
+    }
+  }
+}

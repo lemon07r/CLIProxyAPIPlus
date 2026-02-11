@@ -31,6 +31,16 @@ These changes are committed directly to the fork's Go source and maintained acro
 
 ---
 
+## Example Configs
+
+- **[`config.example.custom.yaml`](config.example.custom.yaml)** -- Proxy config with model aliases for Codex, Copilot, Antigravity, and Kimi providers. Copy to `config.yaml` and fill in your secrets.
+- **[`example.opencode.json`](example.opencode.json)** -- [opencode](https://opencode.ai) client config with all providers pre-configured. Copy to `~/.config/opencode/opencode.json` and update the `baseURL` and `apiKey` fields.
+
+> [!TIP]
+> Using a different AI coding agent (Cline, Continue, Cursor, etc.)? You can feed `example.opencode.json` to an AI and ask it to convert the provider/model definitions into your agent's config format. The model IDs, context limits, and endpoint URLs are the same regardless of client.
+
+---
+
 ### AMD64 / Building Your Own Image
 
 Pre-built images are **arm64 only**. If you're on AMD64 (Intel/AMD x86_64), you have two options:
