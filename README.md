@@ -31,12 +31,20 @@ These changes are committed directly to the fork's Go source and maintained acro
 
 ---
 
-### Enabling AMD64 Support
+### AMD64 / Building Your Own Image
 
-To build this fork for your own Intel/AMD x86_64 systems, follow these steps:
+Pre-built images are **arm64 only**. If you're on AMD64 (Intel/AMD x86_64), you have two options:
 
-1.  **Fork this repository** to your own account.
-2.  Edit `.github/workflows/build-and-push.yml` in your fork:
+**Option A: Build locally**
+```bash
+docker compose build
+```
+This uses the `build:` section already in `docker-compose.yml` to build for your native architecture.
+
+**Option B: Fork and set up CI/CD**
+1.  Fork this repository to your own account.
+2.  Add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets in your fork's GitHub settings.
+3.  Edit `.github/workflows/build-and-push.yml`:
     *   Change `runs-on: ubuntu-24.04-arm` to `runs-on: ubuntu-latest`.
     *   Add the QEMU setup step before Docker Buildx:
         ```yaml
@@ -47,7 +55,11 @@ To build this fork for your own Intel/AMD x86_64 systems, follow these steps:
         ```yaml
         platforms: linux/amd64
         ```
-3.  Commit the changes. GitHub Actions will now build a 64-bit x86 image for you.
+4.  Set `CLI_PROXY_IMAGE` in a `.env` file to point to your own Docker Hub image:
+    ```
+    CLI_PROXY_IMAGE=your-dockerhub-user/cli-proxy-api-plus:latest
+    ```
+5.  Commit the changes. GitHub Actions will build and push an AMD64 image to your registry.
 
 ---
 
