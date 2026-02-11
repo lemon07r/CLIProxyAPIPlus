@@ -37,7 +37,7 @@ These changes are committed directly to the fork's Go source and maintained acro
 - **[`example.opencode.json`](example.opencode.json)** -- [opencode](https://opencode.ai) client config with all providers pre-configured. Copy to `~/.config/opencode/opencode.json` and update the `baseURL` and `apiKey` fields.
 
 > [!TIP]
-> Using a different AI coding agent (Cline, Continue, Cursor, etc.)? You can feed `example.opencode.json` to an AI and ask it to convert the provider/model definitions into your agent's config format. The model IDs, context limits, and endpoint URLs are the same regardless of client.
+> Using a different AI coding agent (Cline, Droid, Kilo, etc.)? You can feed `example.opencode.json` to an AI and ask it to convert the provider/model definitions into your agent's config format. The model IDs, context limits, and endpoint URLs are the same regardless of client.
 
 ---
 
