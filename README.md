@@ -23,6 +23,9 @@ Fixes thinking signature handling in the Antigravity Gemini translator for multi
 ### 005 - Copilot Alias Prefix Stripping
 Strips the `copilot-` alias prefix from model names before sending requests to GitHub Copilot's upstream API. When `oauth-model-alias` creates forked models (e.g., `copilot-gpt-5.2` from `gpt-5.2`), the alias flows through as the model name. Copilot's API only accepts the original name, so this patch updates `normalizeModel` to strip the prefix.
 
+### 006 - Antigravity Assistant Prefill Fix
+Handles Claude assistant message prefill for the Antigravity backend. Claude clients (opencode, Claude Code, etc.) send a trailing assistant message with partial content to guide the model's response — a Claude-specific feature the Antigravity/Gemini API rejects. This patch detects trailing model messages (that aren't tool-use turns), extracts the prefill text, and replaces them with a synthetic user message (`"Continue from: <prefill>"`) to preserve the intent. Scoped to Claude models only — native Gemini models are unaffected.
+
 ### Direct Source Changes (not patches)
 
 These changes are committed directly to the fork's Go source and maintained across upstream merges:
