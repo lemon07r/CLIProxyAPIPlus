@@ -1,26 +1,19 @@
-From: CLI Proxy Custom Patches
-Subject: [PATCH 004] Fix thinking signature handling for all models via Antigravity Gemini translator
-
-When models are accessed through the Gemini v1beta endpoint and routed to
-Antigravity, thinking blocks from previous conversation turns may carry
-stale or cross-provider signatures that cause validation failures.
-
-For Gemini models, the existing skip_thought_signature_validator sentinel
-bypasses Google's signature validation. For Claude models, the sentinel is
-NOT recognized by Claude's API, so thinking blocks must be stripped entirely
-from previous assistant messages instead.
-
-This also cleans up both camelCase (thoughtSignature) and snake_case
-(thought_signature) signature fields, since clients like @ai-sdk/google
-may send either format.
-
-Key changes:
-- For non-Claude models: apply skip sentinel to thinking and functionCall
-  parts, also clear snake_case thought_signature to prevent passthrough
-- For Claude models: strip thinking blocks from previous assistant turns
-  and clear stale signatures from functionCall parts
-
----
+# PATCH 004: Fix thinking signature handling for all models via Antigravity Gemini translator
+#
+# When models are accessed through the Gemini v1beta endpoint and routed to
+# Antigravity, thinking blocks from previous conversation turns may carry
+# stale or cross-provider signatures that cause validation failures.
+#
+# For Gemini models: apply skip_thought_signature_validator sentinel.
+# For Claude models: strip thinking blocks entirely from previous assistant
+# messages (Claude rejects the sentinel as an invalid signature).
+# Also cleans up both camelCase and snake_case signature fields.
+#
+# Key changes:
+# - For non-Claude: apply skip sentinel to thinking and functionCall parts,
+#   clear snake_case thought_signature
+# - For Claude: strip thinking blocks from previous assistant turns,
+#   clear stale signatures from functionCall parts
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go

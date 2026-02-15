@@ -1,38 +1,32 @@
-From: CLI Proxy Custom Patches
-Subject: [PATCH 005] Strip copilot- alias prefix in upstream requests
-
-When models are registered via oauth-model-alias with fork:true and a
-copilot- prefix (e.g., copilot-gpt-5.2 -> gpt-5.2), the alias name
-is used as req.Model throughout the proxy. However, GitHub Copilot's
-upstream API only recognizes the original model name (gpt-5.2), not
-the aliased name (copilot-gpt-5.2).
-
-This patch updates normalizeModel to strip the copilot- prefix from
-the model field in the JSON payload before sending to upstream.
-
-This patch should be applied AFTER 002-copilot-claude-endpoint.patch.
-
----
-diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+# PATCH 005: Strip copilot- alias prefix in upstream requests
+#
+# When models are registered via oauth-model-alias with fork:true and a
+# copilot- prefix (e.g., copilot-gpt-5.2 -> gpt-5.2), the alias name
+# is used as req.Model throughout the proxy. However, GitHub Copilot's
+# upstream API only recognizes the original model name (gpt-5.2), not
+# the aliased name (copilot-gpt-5.2).
+#
+# This patch updates normalizeModel to also strip the copilot- prefix
+# from the model field in the JSON payload before sending to upstream.
+#
+# Apply AFTER 002-copilot-claude-endpoint.patch.
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -473,9 +473,16 @@ func detectVisionContent(body []byte) bool {
+@@ -540,11 +540,14 @@
  	return false
  }
  
--// normalizeModel is a no-op as GitHub Copilot accepts model names directly.
--// Model mapping should be done at the registry level if needed.
--func (e *GitHubCopilotExecutor) normalizeModel(_ string, body []byte) []byte {
-+// normalizeModel strips the "copilot-" alias prefix from the model field
-+// in the request payload. When oauth-model-alias creates forked models
-+// (e.g., copilot-gpt-5.2 from gpt-5.2), the alias name flows through as
-+// req.Model. GitHub Copilot's upstream API only accepts the original name.
-+func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
-+	if strings.HasPrefix(model, "copilot-") {
-+		upstream := strings.TrimPrefix(model, "copilot-")
-+		body, _ = sjson.SetBytes(body, "model", upstream)
-+		return body
+-// normalizeModel strips the suffix (e.g. "(medium)") from the model name
+-// before sending to GitHub Copilot, as the upstream API does not accept
+-// suffixed model identifiers.
++// normalizeModel strips the suffix (e.g. "(medium)") and the "copilot-" alias
++// prefix from the model name before sending to GitHub Copilot, as the upstream
++// API does not accept suffixed or prefixed model identifiers.
+ func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
+ 	baseModel := thinking.ParseSuffix(model).ModelName
++	if strings.HasPrefix(baseModel, "copilot-") {
++		baseModel = strings.TrimPrefix(baseModel, "copilot-")
 +	}
- 	return body
- }
- 
+ 	if baseModel != model {
+ 		body, _ = sjson.SetBytes(body, "model", baseModel)
+ 	}

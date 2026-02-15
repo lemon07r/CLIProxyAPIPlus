@@ -1,21 +1,18 @@
-From: CLI Proxy Custom Patches
-Subject: [PATCH 001] Unlimited Copilot Premium Headers
-
-This patch modifies the GitHub Copilot executor to always set X-Initiator
-to "agent" and adds VSCode spoofing headers for unlimited premium request
-access. It also updates header version strings to newer values.
-
-Key changes:
-- Update copilotUserAgent to "GithubCopilot/1.0"
-- Update copilotEditorVersion to "vscode/1.109.0-20260124"
-- Update copilotPluginVersion to "copilot-chat/0.37.2026013101"
-- Update copilotOpenAIIntent to "conversation-panel"
-- Add copilotAPIVersion and copilotThinkingBeta constants
-- Always set X-Initiator to "agent" (removes dynamic logic)
-- Add X-GitHub-Api-Version header
-- Add VScode-SessionId and VScode-MachineId headers with random UUIDs
-
----
+# PATCH 001: Unlimited Copilot Premium Headers
+#
+# This patch modifies the GitHub Copilot executor to always set X-Initiator
+# to "agent" and adds VSCode spoofing headers for unlimited premium request
+# access. It also updates header version strings to newer values.
+#
+# Key changes:
+# - Update copilotUserAgent to "GithubCopilot/1.0"
+# - Update copilotEditorVersion to "vscode/1.109.0-20260124"
+# - Update copilotPluginVersion to "copilot-chat/0.37.2026013101"
+# - Update copilotOpenAIIntent to "conversation-panel"
+# - Add copilotAPIVersion and copilotThinkingBeta constants
+# - Always set X-Initiator to "agent" (removes dynamic logic)
+# - Add X-GitHub-Api-Version header
+# - Add VScode-SessionId and VScode-MachineId headers with random UUIDs
 diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go

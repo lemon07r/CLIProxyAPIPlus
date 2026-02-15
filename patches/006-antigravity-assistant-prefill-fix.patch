@@ -1,31 +1,17 @@
-From: CLI Proxy Custom Patches
-Subject: [PATCH 006] Handle assistant message prefill for Claude models via Antigravity
-
-When clients (e.g. opencode, Claude Code) send a Claude API request with
-assistant prefill (the last message has role "assistant" with partial
-content to guide the model's response), the Antigravity/Gemini backend
-rejects it with:
-
-  "This model does not support assistant message prefill. The conversation
-   must end with a user message."
-
-Assistant prefill is a Claude-specific feature with no Gemini equivalent.
-This patch handles it in both the Claude-to-Antigravity and
-Gemini-to-Antigravity translators (scoped to Claude models only) by:
-
-1. Detecting when the last content message has role "model" (translated
-   from "assistant") and contains no functionCall parts (which would
-   indicate a legitimate tool-use turn, not a prefill)
-2. Extracting any text content from the trailing model message
-3. Removing the trailing model message
-4. Appending a synthetic user message with the prefill text as a
-   continuation hint ("Continue from: <prefill>"), preserving the
-   client's intent while satisfying the API constraint
-
-Native Gemini models (gemini-2.5-pro, gemini-2.5-flash, etc.) are
-unaffected by this patch.
-
----
+# PATCH 006: Handle assistant message prefill for Claude models via Antigravity
+#
+# When clients (e.g. opencode, Claude Code) send a Claude API request with
+# assistant prefill (last message has role "assistant" with partial content),
+# the Antigravity/Gemini backend rejects it.
+#
+# This patch handles it in both Claude-to-Antigravity and Gemini-to-Antigravity
+# translators (scoped to Claude models only) by:
+# 1. Detecting trailing "model" messages without functionCall parts
+# 2. Extracting text content as prefill
+# 3. Removing the trailing model message
+# 4. Appending a synthetic user message with continuation hint
+#
+# Native Gemini models are unaffected.
 diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
 --- a/internal/translator/antigravity/claude/antigravity_claude_request.go
 +++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
