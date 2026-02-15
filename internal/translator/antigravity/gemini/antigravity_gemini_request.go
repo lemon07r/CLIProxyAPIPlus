@@ -87,6 +87,56 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		})
 	}
 
+	// Handle assistant prefill for Claude models routed via the Gemini translator:
+	// if the last content has role "model", the Antigravity API will reject the request.
+	// Only applies to Claude models — native Gemini models do not receive prefill.
+	if strings.Contains(modelName, "claude") {
+		contents = gjson.GetBytes(rawJSON, "request.contents")
+		if contents.Exists() && contents.IsArray() {
+			contentsArray := contents.Array()
+			if len(contentsArray) > 0 {
+				lastContent := contentsArray[len(contentsArray)-1]
+				if lastContent.Get("role").String() == "model" {
+					// Check that the last model message has no functionCall parts
+					// (those are legitimate mid-conversation tool-use turns, not prefill)
+					hasFunctionCall := false
+					lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+						if part.Get("functionCall").Exists() {
+							hasFunctionCall = true
+							return false
+						}
+						return true
+					})
+
+					if !hasFunctionCall {
+						// Collect text parts from the trailing model message
+						var prefillTexts []string
+						lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+							if t := part.Get("text").String(); t != "" {
+								prefillTexts = append(prefillTexts, t)
+							}
+							return true
+						})
+
+						// Remove the trailing model message
+						lastIdx := len(contentsArray) - 1
+						rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("request.contents.%d", lastIdx))
+
+						// If the prefill had text content, inject a synthetic user message
+						if len(prefillTexts) > 0 {
+							prefill := strings.Join(prefillTexts, "")
+							syntheticUser := `{"role":"user","parts":[]}`
+							partJSON := `{}`
+							partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+prefill)
+							syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
+							rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.-1", []byte(syntheticUser))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()

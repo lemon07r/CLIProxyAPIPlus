@@ -308,6 +308,61 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
+	// Handle assistant prefill: if the last message has role "model", the Antigravity
+	// API will reject the request ("This model does not support assistant message prefill.
+	// The conversation must end with a user message."). Extract the prefill text and
+	// replace it with a synthetic user message that preserves the intent.
+	if hasContents {
+		contentsArray := gjson.Parse(contentsJSON).Array()
+		if len(contentsArray) > 0 {
+			lastContent := contentsArray[len(contentsArray)-1]
+			if lastContent.Get("role").String() == "model" {
+				// Check that the last model message has no functionCall parts
+				// (those are legitimate mid-conversation tool-use turns, not prefill)
+				hasFunctionCall := false
+				lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+					if part.Get("functionCall").Exists() {
+						hasFunctionCall = true
+						return false
+					}
+					return true
+				})
+
+				if !hasFunctionCall {
+					// Collect text parts from the trailing model message
+					var prefillTexts []string
+					lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+						if t := part.Get("text").String(); t != "" {
+							prefillTexts = append(prefillTexts, t)
+						}
+						return true
+					})
+
+					// Remove the trailing model message
+					trimmedContents := "[]"
+					for idx := 0; idx < len(contentsArray)-1; idx++ {
+						trimmedContents, _ = sjson.SetRaw(trimmedContents, "-1", contentsArray[idx].Raw)
+					}
+					contentsJSON = trimmedContents
+
+					// If the prefill had text content, inject a synthetic user message
+					// so the model receives the intended continuation hint
+					if len(prefillTexts) > 0 {
+						prefill := strings.Join(prefillTexts, "")
+						syntheticUser := `{"role":"user","parts":[]}`
+						partJSON := `{}`
+						partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+prefill)
+						syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
+						contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", syntheticUser)
+					}
+
+					// Update hasContents based on remaining contents
+					hasContents = len(gjson.Parse(contentsJSON).Array()) > 0
+				}
+			}
+		}
+	}
+
 	// tools
 	toolsJSON := ""
 	toolDeclCount := 0
