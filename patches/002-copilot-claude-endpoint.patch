@@ -19,8 +19,8 @@
 # - Skip vision content detection for Claude models
 #
 # Apply AFTER 001-unlimited-copilot-headers.patch.
---- a/internal/runtime/executor/github_copilot_executor.go	2026-02-15 14:41:53.466103300 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-15 14:42:05.782151216 +0000
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-16 18:41:23.195260780 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-16 18:41:23.187260746 +0000
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
