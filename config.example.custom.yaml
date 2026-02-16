@@ -32,6 +32,10 @@ streaming:
   bootstrap-retries: 3
 codex-instructions-enabled: false
 oauth-model-alias:
+  # Qwen aliases: give coder-model a friendlier name (requires patch 003)
+  qwen:
+    - name: coder-model
+      alias: qwen3.5-plus
   # Antigravity aliases: rename Claude models to appear as Gemini models
   antigravity:
     - name: claude-opus-4-6-thinking

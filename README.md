@@ -17,6 +17,9 @@ Updates GitHub Copilot executor headers for premium model requests. Sets `X-Init
 ### 002 - Copilot Claude Endpoint Support
 Adds native Claude API support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Removes unsupported `stream_options` and skips OpenAI-specific content processing for Claude requests.
 
+### 003 - Kimi K2.5 Context Length Fix
+Corrects the `kimi-k2.5` context window from 131,072 to 262,144 (256K) tokens in the static model definitions. The upstream value was too low — Kimi K2.5 supports a 256K context window.
+
 ### 004 - Antigravity Thinking Signature Fix
 Fixes thinking signature handling in the Antigravity Gemini translator for multi-turn conversations. For Gemini models, applies the `skip_thought_signature_validator` sentinel. For Claude models, strips thinking blocks from previous assistant turns instead (Claude rejects the sentinel as an invalid signature). Also cleans up snake_case `thought_signature` fields that clients like `@ai-sdk/google` may send, preventing stale cross-provider signatures from passing through.
 
@@ -36,7 +39,7 @@ These changes are committed directly to the fork's Go source and maintained acro
 
 ## Example Configs
 
-- **[`config.example.custom.yaml`](config.example.custom.yaml)** -- Proxy config with model aliases for Codex, Copilot, Antigravity, and Kimi providers. Copy to `config.yaml` and fill in your secrets.
+- **[`config.example.custom.yaml`](config.example.custom.yaml)** -- Proxy config with model aliases for Qwen, Codex, Copilot, Antigravity, and Kimi providers. Copy to `config.yaml` and fill in your secrets.
 - **[`example.opencode.json`](example.opencode.json)** -- [opencode](https://opencode.ai) client config with all providers pre-configured. Copy to `~/.config/opencode/opencode.json` and update the `baseURL` and `apiKey` fields.
 
 > [!TIP]

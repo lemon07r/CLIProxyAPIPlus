@@ -41,7 +41,7 @@
           "name": "Claude Opus 4.6 (Copilot)",
           "reasoning": true,
           "limit": {
-            "context": 128000,
+            "context": 200000,
             "output": 64000
           }
         },
@@ -50,8 +50,8 @@
           "name": "Gemini 3 Pro Preview (Copilot)",
           "reasoning": true,
           "limit": {
-            "context": 109000,
-            "output": 64000
+            "context": 1048576,
+            "output": 65536
           }
         },
         "copilot-gemini-3-flash-preview": {
@@ -59,8 +59,8 @@
           "name": "Gemini 3 Flash Preview (Copilot)",
           "reasoning": true,
           "limit": {
-            "context": 109000,
-            "output": 64000
+            "context": 1048576,
+            "output": 65536
           }
         }
       }
@@ -78,8 +78,8 @@
           "name": "GPT-5.2 (Copilot /responses)",
           "reasoning": true,
           "limit": {
-            "context": 128000,
-            "output": 64000
+            "context": 200000,
+            "output": 32768
           }
         },
         "gpt-5.2-codex": {
@@ -87,8 +87,26 @@
           "name": "GPT-5.2 Codex (Copilot /responses)",
           "reasoning": true,
           "limit": {
-            "context": 272000,
-            "output": 128000
+            "context": 200000,
+            "output": 32768
+          }
+        }
+      }
+    },
+    "cliproxy-qwen": {
+      "name": "CLI Proxy (Qwen)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://your.cliproxy.ip.or.url/v1",
+        "apiKey": "sk-your-cliproxy-apikey"
+      },
+      "models": {
+        "qwen3.5-plus": {
+          "id": "qwen3.5-plus",
+          "name": "Qwen 3.5 Plus",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
           }
         }
       }
