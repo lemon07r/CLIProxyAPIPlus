@@ -1,0 +1,44 @@
+# PATCH 007: Merge consecutive same-role turns for Gemini API compatibility
+#
+# The Gemini API requires strict user/model turn alternation. When the translated
+# conversation has consecutive turns with the same role (e.g. two "model" turns
+# in a row from thinking + function calls), the API rejects the request with
+# "Request contains an invalid argument." This patch merges consecutive same-role
+# turns by combining their parts arrays into a single turn.
+diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+@@ -87,6 +87,33 @@
+ 		})
+ 	}
+ 
++	// Merge consecutive same-role turns: Gemini API requires strict user/model alternation.
++	// When the translated conversation has consecutive turns with the same role (e.g. two
++	// "model" turns in a row), merge their parts arrays into a single turn.
++	contents = gjson.GetBytes(rawJSON, "request.contents")
++	if contents.Exists() && contents.IsArray() {
++		mergedContents := `{"contents":[]}`
++		prevRole := ""
++		mergedIdx := -1
++		contents.ForEach(func(_, value gjson.Result) bool {
++			role := value.Get("role").String()
++			if role == prevRole && mergedIdx >= 0 {
++				// Same role as previous turn — append parts to the existing turn
++				value.Get("parts").ForEach(func(_, part gjson.Result) bool {
++					mergedContents, _ = sjson.SetRaw(mergedContents, fmt.Sprintf("contents.%d.parts.-1", mergedIdx), part.Raw)
++					return true
++				})
++			} else {
++				// Different role — add as a new turn
++				mergedContents, _ = sjson.SetRaw(mergedContents, "contents.-1", value.Raw)
++				mergedIdx++
++				prevRole = role
++			}
++			return true
++		})
++		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", []byte(gjson.Get(mergedContents, "contents").Raw))
++	}
++
+ 	// Handle assistant prefill for Claude models routed via the Gemini translator:
+ 	// if the last content has role "model", the Antigravity API will reject the request.
+ 	// Only applies to Claude models — native Gemini models do not receive prefill.
