@@ -29,6 +29,9 @@ Strips the `copilot-` alias prefix from model names before sending requests to G
 ### 006 - Antigravity Assistant Prefill Fix
 Handles Claude assistant message prefill for the Antigravity backend. Claude clients (opencode, Claude Code, etc.) send a trailing assistant message with partial content to guide the model's response — a Claude-specific feature the Antigravity/Gemini API rejects. This patch detects trailing model messages (that aren't tool-use turns), extracts the prefill text, and replaces them with a synthetic user message (`"Continue from: <prefill>"`) to preserve the intent. Scoped to Claude models only — native Gemini models are unaffected.
 
+### 007 - Antigravity Merge Consecutive Turns
+Merges consecutive same-role turns in the Antigravity Gemini translator before sending requests to the Gemini API. The Gemini API requires strict `user` → `model` → `user` → `model` alternation — consecutive turns with the same role cause an `INVALID_ARGUMENT` error. This patch detects adjacent turns sharing a role and combines their `parts` arrays into a single turn, preserving all content while satisfying the API constraint. Commonly triggered by long multi-turn conversations where the OpenAI/Claude → Gemini translation produces back-to-back model messages.
+
 ### Direct Source Changes (not patches)
 
 These changes are committed directly to the fork's Go source and maintained across upstream merges:
