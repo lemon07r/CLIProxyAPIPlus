@@ -87,6 +87,83 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		})
 	}
 
+	// Merge consecutive same-role turns: Gemini API requires strict user/model alternation.
+	// When the translated conversation has consecutive turns with the same role (e.g. two
+	// "model" turns in a row), merge their parts arrays into a single turn.
+	contents = gjson.GetBytes(rawJSON, "request.contents")
+	if contents.Exists() && contents.IsArray() {
+		mergedContents := `{"contents":[]}`
+		prevRole := ""
+		mergedIdx := -1
+		contents.ForEach(func(_, value gjson.Result) bool {
+			role := value.Get("role").String()
+			if role == prevRole && mergedIdx >= 0 {
+				// Same role as previous turn — append parts to the existing turn
+				value.Get("parts").ForEach(func(_, part gjson.Result) bool {
+					mergedContents, _ = sjson.SetRaw(mergedContents, fmt.Sprintf("contents.%d.parts.-1", mergedIdx), part.Raw)
+					return true
+				})
+			} else {
+				// Different role — add as a new turn
+				mergedContents, _ = sjson.SetRaw(mergedContents, "contents.-1", value.Raw)
+				mergedIdx++
+				prevRole = role
+			}
+			return true
+		})
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", []byte(gjson.Get(mergedContents, "contents").Raw))
+	}
+
+	// Handle assistant prefill for Claude models routed via the Gemini translator:
+	// if the last content has role "model", the Antigravity API will reject the request.
+	// Only applies to Claude models — native Gemini models do not receive prefill.
+	if strings.Contains(modelName, "claude") {
+		contents = gjson.GetBytes(rawJSON, "request.contents")
+		if contents.Exists() && contents.IsArray() {
+			contentsArray := contents.Array()
+			if len(contentsArray) > 0 {
+				lastContent := contentsArray[len(contentsArray)-1]
+				if lastContent.Get("role").String() == "model" {
+					// Check that the last model message has no functionCall parts
+					// (those are legitimate mid-conversation tool-use turns, not prefill)
+					hasFunctionCall := false
+					lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+						if part.Get("functionCall").Exists() {
+							hasFunctionCall = true
+							return false
+						}
+						return true
+					})
+
+					if !hasFunctionCall {
+						// Collect text parts from the trailing model message
+						var prefillTexts []string
+						lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
+							if t := part.Get("text").String(); t != "" {
+								prefillTexts = append(prefillTexts, t)
+							}
+							return true
+						})
+
+						// Remove the trailing model message
+						lastIdx := len(contentsArray) - 1
+						rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("request.contents.%d", lastIdx))
+
+						// If the prefill had text content, inject a synthetic user message
+						if len(prefillTexts) > 0 {
+							prefill := strings.Join(prefillTexts, "")
+							syntheticUser := `{"role":"user","parts":[]}`
+							partJSON := `{}`
+							partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+prefill)
+							syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
+							rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.-1", []byte(syntheticUser))
+						}
+					}
+				}
+			}
+		}
+	}
+
 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
@@ -154,35 +231,51 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		return true
 	})
 
-	// Gemini-specific handling for non-Claude models:
-	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
-	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
-	if !strings.Contains(modelName, "claude") {
+	// Handle thinking signatures for all models routed through Antigravity.
+	// For Gemini models: add skip_thought_signature_validator sentinel (Google honors it).
+	// For Claude models: strip thinking blocks entirely from previous assistant turns,
+	// because Claude rejects the sentinel as an invalid signature.
+	// Also clean up snake_case thought_signature to prevent stale cross-provider
+	// signatures from passing through to the upstream API.
+	isClaude := strings.Contains(modelName, "claude")
+	{
 		const skipSentinel = "skip_thought_signature_validator"
 
 		gjson.GetBytes(rawJSON, "request.contents").ForEach(func(contentIdx, content gjson.Result) bool {
 			if content.Get("role").String() == "model" {
-				// First pass: collect indices of thinking parts to mark with skip sentinel
-				var thinkingIndicesToSkipSignature []int64
+				var thinkingIndicesToProcess []int64
 				content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
-					// Collect indices of thinking blocks to mark with skip sentinel
 					if part.Get("thought").Bool() {
-						thinkingIndicesToSkipSignature = append(thinkingIndicesToSkipSignature, partIdx.Int())
+						thinkingIndicesToProcess = append(thinkingIndicesToProcess, partIdx.Int())
 					}
-					// Add skip sentinel to functionCall parts
 					if part.Get("functionCall").Exists() {
-						existingSig := part.Get("thoughtSignature").String()
-						if existingSig == "" || len(existingSig) < 50 {
-							rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), partIdx.Int()), skipSentinel)
+						basePath := fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), partIdx.Int())
+						if isClaude {
+							// Clear stale signatures from functionCall parts for Claude
+							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thoughtSignature")
+							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
+						} else {
+							existingSig := part.Get("thoughtSignature").String()
+							if existingSig == "" || len(existingSig) < 50 {
+								rawJSON, _ = sjson.SetBytes(rawJSON, basePath+".thoughtSignature", skipSentinel)
+							}
+							rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
 						}
 					}
 					return true
 				})
 
-				// Add skip_thought_signature_validator sentinel to thinking blocks in reverse order to preserve indices
-				for i := len(thinkingIndicesToSkipSignature) - 1; i >= 0; i-- {
-					idx := thinkingIndicesToSkipSignature[i]
-					rawJSON, _ = sjson.SetBytes(rawJSON, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), idx), skipSentinel)
+				// Process thinking blocks in reverse order to preserve indices
+				for i := len(thinkingIndicesToProcess) - 1; i >= 0; i-- {
+					idx := thinkingIndicesToProcess[i]
+					basePath := fmt.Sprintf("request.contents.%d.parts.%d", contentIdx.Int(), idx)
+					if isClaude {
+						// Strip thinking blocks for Claude - the sentinel is not a valid Claude signature
+						rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath)
+					} else {
+						rawJSON, _ = sjson.SetBytes(rawJSON, basePath+".thoughtSignature", skipSentinel)
+						rawJSON, _ = sjson.DeleteBytes(rawJSON, basePath+".thought_signature")
+					}
 				}
 			}
 			return true

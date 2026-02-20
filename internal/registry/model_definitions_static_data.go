@@ -961,7 +961,7 @@ func GetKimiModels() []*ModelInfo {
 			Type:                "kimi",
 			DisplayName:         "Kimi K2.5",
 			Description:         "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
-			ContextLength:       131072,
+			ContextLength:       262144,
 			MaxCompletionTokens: 32768,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},

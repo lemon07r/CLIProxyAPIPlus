@@ -1,22 +1,12 @@
-# PATCH 001: Unlimited Copilot Premium Headers
+# PATCH 001: Spoof headers for unlimited premium Copilot requests
 #
-# This patch modifies the GitHub Copilot executor to always set X-Initiator
-# to "agent" and adds VSCode spoofing headers for unlimited premium request
-# access. It also updates header version strings to newer values.
-#
-# Key changes:
-# - Update copilotUserAgent to "GithubCopilot/1.0"
-# - Update copilotEditorVersion to "vscode/1.109.0-20260124"
-# - Update copilotPluginVersion to "copilot-chat/0.37.2026013101"
-# - Update copilotOpenAIIntent to "conversation-panel"
-# - Add copilotAPIVersion and copilotThinkingBeta constants
-# - Always set X-Initiator to "agent" (removes dynamic logic)
-# - Add X-GitHub-Api-Version header
-# - Add VScode-SessionId and VScode-MachineId headers with random UUIDs
-diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+# Updates User-Agent/Editor-Version/Plugin-Version to newer values.
+# Forces X-Initiator to "agent" (bypasses premium quota).
+# Adds random VScode-SessionId/MachineId per request.
+# Adds copilotThinkingBeta constant for Claude thinking support.
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -34,11 +34,14 @@
+@@ -35,12 +35,14 @@
  	maxScannerBufferSize = 20_971_520
  
  	// Copilot API header values.
@@ -27,39 +17,32 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	copilotEditorVersion = "vscode/1.109.0-20260124"
 +	copilotPluginVersion = "copilot-chat/0.37.2026013101"
  	copilotIntegrationID = "vscode-chat"
--	copilotOpenAIIntent  = "conversation-edits"
-+	copilotOpenAIIntent  = "conversation-panel"
+ 	copilotOpenAIIntent  = "conversation-panel"
+ 	copilotGitHubAPIVer  = "2025-04-01"
 +	// Additional headers for unlimited premium requests
-+	copilotAPIVersion    = "2025-10-01"
 +	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
  )
  
  // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
-@@ -427,20 +430,15 @@
- 	r.Header.Set("Openai-Intent", copilotOpenAIIntent)
- 	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
+@@ -489,19 +491,10 @@
+ 	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
  	r.Header.Set("X-Request-Id", uuid.NewString())
--
+ 
 -	initiator := "user"
 -	if len(body) > 0 {
 -		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
--			arr := messages.Array()
--			if len(arr) > 0 {
--				lastRole := arr[len(arr)-1].Get("role").String()
--				if lastRole != "" && lastRole != "user" {
+-			for _, msg := range messages.Array() {
+-				role := msg.Get("role").String()
+-				if role == "assistant" || role == "tool" {
 -					initiator = "agent"
+-					break
 -				}
 -			}
 -		}
 -	}
 -	r.Header.Set("X-Initiator", initiator)
-+	r.Header.Set("X-GitHub-Api-Version", copilotAPIVersion)
 +	// Always set X-Initiator to "agent" for unlimited premium request access.
-+	// This identifies the request as coming from an agentic/automated context
-+	// which bypasses standard premium request quota tracking.
 +	r.Header.Set("X-Initiator", "agent")
-+	// Generate random session/machine IDs per request to mimic VSCode extension
-+	// behavior and avoid detection of request patterns.
 +	r.Header.Set("VScode-SessionId", uuid.NewString())
 +	r.Header.Set("VScode-MachineId", uuid.NewString())
  }
