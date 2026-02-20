@@ -1,13 +1,11 @@
 # PATCH 007: Merge consecutive same-role turns for Gemini API compatibility
 #
-# The Gemini API requires strict user/model turn alternation. When the translated
-# conversation has consecutive turns with the same role (e.g. two "model" turns
-# in a row from thinking + function calls), the API rejects the request with
-# "Request contains an invalid argument." This patch merges consecutive same-role
-# turns by combining their parts arrays into a single turn.
-diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
---- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-+++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+# The Gemini API rejects requests with consecutive messages from the same role.
+# This patch merges consecutive user or model turns into a single turn by
+# combining their parts arrays, which is required when tool results and user
+# messages end up adjacent after translation.
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go	2026-02-20 18:28:09.307328667 +0000
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go	2026-02-20 18:28:09.307328667 +0000
 @@ -87,6 +87,33 @@
  		})
  	}
