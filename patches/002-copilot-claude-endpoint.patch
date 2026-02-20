@@ -1,13 +1,12 @@
-# PATCH 002: Route Copilot Claude models to /v1/messages endpoint + GPT-5 /responses routing
+# PATCH 002: Route Copilot Claude models to /v1/messages endpoint + copilot- prefix stripping
 #
 # - Routes Claude models (copilot-claude-*) to native Anthropic /v1/messages endpoint
-# - Routes GPT-5 models to /responses endpoint using isGPT5Model() check
 # - Strips "copilot-" prefix from model names before sending upstream
 # - Adds anthropic-beta header for Claude, thinking/budget_tokens normalization
 # - Handles Claude usage parsing for both stream and non-stream
 # - Updates applyHeaders to accept format parameter
---- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:35:02.972961929 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:36:42.721356482 +0000
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:46:44.607761620 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:48:02.692073646 +0000
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
@@ -29,12 +28,11 @@
  	defer reporter.trackFailure(ctx, &err)
  
  	from := opts.SourceFormat
--	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
++	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
+ 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
 -	to := sdktranslator.FromString("openai")
 -	if useResponses {
 -		to = sdktranslator.FromString("openai-response")
-+	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
-+	useResponses := isGPT5Model(req.Model)
 +	toFormat := "openai"
 +	if useClaude {
 +		toFormat = "claude"
@@ -95,7 +93,7 @@
 -		path = githubCopilotResponsesPath
 -	}
 -	url := baseURL + path
-+	url := baseURL + getCopilotEndpointPath(req.Model, to)
++	url := baseURL + getCopilotEndpointPath(req.Model, useResponses, to)
  	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
  	if err != nil {
  		return resp, err
@@ -133,12 +131,11 @@
  	defer reporter.trackFailure(ctx, &err)
  
  	from := opts.SourceFormat
--	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
++	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
+ 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
 -	to := sdktranslator.FromString("openai")
 -	if useResponses {
 -		to = sdktranslator.FromString("openai-response")
-+	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
-+	useResponses := isGPT5Model(req.Model)
 +	toFormat := "openai"
 +	if useClaude {
 +		toFormat = "claude"
@@ -205,7 +202,7 @@
 -		path = githubCopilotResponsesPath
 -	}
 -	url := baseURL + path
-+	url := baseURL + getCopilotEndpointPath(req.Model, to)
++	url := baseURL + getCopilotEndpointPath(req.Model, useResponses, to)
  	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
  	if err != nil {
  		return nil, err
@@ -278,16 +275,10 @@
  	if baseModel != model {
  		body, _ = sjson.SetBytes(body, "model", baseModel)
  	}
-@@ -544,6 +573,79 @@
+@@ -544,6 +573,73 @@
  	return strings.Contains(baseModel, "codex")
  }
  
-+// isGPT5Model checks if the model is a GPT-5 series model that requires the /responses endpoint.
-+func isGPT5Model(model string) bool {
-+	normalized := strings.TrimPrefix(model, "copilot-")
-+	return strings.HasPrefix(normalized, "gpt-5")
-+}
-+
 +// isCopilotClaudeModel checks if the model is a Claude model that should use
 +// the /v1/messages endpoint on GitHub Copilot.
 +func isCopilotClaudeModel(model string) bool {
@@ -299,11 +290,11 @@
 +	return format == sdktranslator.FormatClaude
 +}
 +
-+func getCopilotEndpointPath(model string, format sdktranslator.Format) string {
++func getCopilotEndpointPath(model string, useResponses bool, format sdktranslator.Format) string {
 +	if isCopilotClaudeFormat(format) {
 +		return githubCopilotMessagesPath
 +	}
-+	if isGPT5Model(model) {
++	if useResponses {
 +		return githubCopilotResponsesPath
 +	}
 +	return githubCopilotChatPath
