@@ -4,8 +4,9 @@
 # Anthropic /v1/messages endpoint on GitHub Copilot. Translates to Claude format,
 # handles thinking/budget_tokens, skips OpenAI-specific processing for Claude,
 # parses Claude usage stats, and adds anthropic-beta header.
---- a/internal/runtime/executor/github_copilot_executor.go
-+++ b/internal/runtime/executor/github_copilot_executor.go
+# Applies to both Execute (non-streaming) and ExecuteStream (streaming) paths.
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:16:20.228230118 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:16:33.452282099 +0000
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
@@ -118,7 +119,84 @@
  		converted = translateGitHubCopilotResponsesNonStreamToClaude(data)
  	} else {
  		converted = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
-@@ -296,7 +309,7 @@
+@@ -244,11 +257,15 @@
+ 	defer reporter.trackFailure(ctx, &err)
+ 
+ 	from := opts.SourceFormat
++	useClaude := isCopilotClaudeModel(req.Model)
+ 	useResponses := useGitHubCopilotResponsesEndpoint(from, req.Model)
+-	to := sdktranslator.FromString("openai")
+-	if useResponses {
+-		to = sdktranslator.FromString("openai-response")
++	toFormat := "openai"
++	if useClaude {
++		toFormat = "claude"
++	} else if useResponses {
++		toFormat = "openai-response"
+ 	}
++	to := sdktranslator.FromString(toFormat)
+ 	originalPayload := bytes.Clone(req.Payload)
+ 	if len(opts.OriginalRequest) > 0 {
+ 		originalPayload = bytes.Clone(opts.OriginalRequest)
+@@ -256,39 +273,42 @@
+ 	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
+ 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
+ 	body = e.normalizeModel(req.Model, body)
+-	body = flattenAssistantContent(body)
++	if !useClaude {
++		body = flattenAssistantContent(body)
++	}
+ 
+ 	// Detect vision content before input normalization removes messages
+ 	hasVision := detectVisionContent(body)
+ 
+-	thinkingProvider := "openai"
+-	if useResponses {
+-		thinkingProvider = "codex"
+-	}
+-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), thinkingProvider, e.Identifier())
+-	if err != nil {
+-		return nil, err
++	if !useClaude {
++		thinkingProvider := "openai"
++		if useResponses {
++			thinkingProvider = "codex"
++		}
++		body, err = thinking.ApplyThinking(body, req.Model, from.String(), thinkingProvider, e.Identifier())
++		if err != nil {
++			return nil, err
++		}
+ 	}
+ 
+ 	if useResponses {
+ 		body = normalizeGitHubCopilotResponsesInput(body)
+ 		body = normalizeGitHubCopilotResponsesTools(body)
+-	} else {
++	} else if !useClaude {
+ 		body = normalizeGitHubCopilotChatTools(body)
+ 	}
+ 	requestedModel := payloadRequestedModel(opts, req.Model)
+ 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated, requestedModel)
++	if useClaude {
++		body = normalizeCopilotClaudeThinking(req.Model, body)
++	}
+ 	body, _ = sjson.SetBytes(body, "stream", true)
+ 	// Enable stream options for usage stats in stream
+-	if !useResponses {
++	if !useResponses && !useClaude {
+ 		body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+ 	}
+ 
+-	path := githubCopilotChatPath
+-	if useResponses {
+-		path = githubCopilotResponsesPath
+-	}
+-	url := baseURL + path
++	url := baseURL + getCopilotEndpointPath(req.Model, to)
+ 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+ 	if err != nil {
+ 		return nil, err
+@@ -296,7 +316,7 @@
  	e.applyHeaders(httpReq, apiToken, body)
  
  	// Add Copilot-Vision-Request header if the request contains vision content
@@ -127,7 +205,7 @@
  		httpReq.Header.Set("Copilot-Vision-Request", "true")
  	}
  
-@@ -366,7 +379,11 @@
+@@ -366,7 +386,11 @@
  				if bytes.Equal(data, []byte("[DONE]")) {
  					continue
  				}
@@ -140,7 +218,7 @@
  					reporter.publish(ctx, detail)
  				} else if useResponses {
  					if detail, ok := parseOpenAIResponsesStreamUsage(line); ok {
-@@ -376,7 +393,7 @@
+@@ -376,7 +400,7 @@
  			}
  
  			var chunks []string
@@ -149,7 +227,7 @@
  				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)
  			} else {
  				chunks = sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
-@@ -495,6 +512,9 @@
+@@ -495,6 +519,9 @@
  	r.Header.Set("X-Initiator", "agent")
  	r.Header.Set("VScode-SessionId", uuid.NewString())
  	r.Header.Set("VScode-MachineId", uuid.NewString())
@@ -159,7 +237,7 @@
  }
  
  // detectVisionContent checks if the request body contains vision/image content.
-@@ -536,6 +556,84 @@
+@@ -536,6 +563,84 @@
  	return body
  }
  
