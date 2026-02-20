@@ -27,7 +27,15 @@ Handles Claude assistant message prefill for the Antigravity backend. Claude cli
 Merges consecutive same-role turns in the Antigravity Gemini translator before sending requests to the Gemini API. The Gemini API requires strict `user` → `model` → `user` → `model` alternation — consecutive turns with the same role cause an `INVALID_ARGUMENT` error. This patch detects adjacent turns sharing a role and combines their `parts` arrays into a single turn, preserving all content while satisfying the API constraint. Commonly triggered by long multi-turn conversations where the OpenAI/Claude → Gemini translation produces back-to-back model messages.
 
 ### 006 - Antigravity Anti-Fingerprinting
-Fixes three fingerprinting vectors in the Antigravity executor. **Session ID:** Salts with auth token ID to prevent cross-account correlation and fixes the format to match real traffic (`-{uuid}:{model}:{project}:seed-{hex16}` instead of a bare numeric string). **User-Agent:** Replaces the incorrect `antigravity/1.104.0` (VS Code base version) with real Antigravity plugin versions (`1.16.5`–`1.18.3`), varies platform per auth token, and caches for consistency. **Project ID:** Expands fallback word pools from 5×5 (25 combinations) to 30×30 (900 combinations) to reduce collision probability.
+Comprehensive anti-fingerprinting for the Antigravity executor — goes well beyond what other proxy solutions offer by making each auth account look like a distinct, real Antigravity IDE installation rather than a single proxy instance multiplexing requests.
+
+**Why this matters:** Without these fixes, all requests from a proxy share identical session IDs, user-agent strings, and project names — trivially detectable patterns that no legitimate user would produce. Most proxy solutions either ignore this entirely or use a single hardcoded user-agent for all traffic.
+
+**Session ID:** Salts the session ID with each auth token's unique ID so that different accounts never share the same session, preventing cross-account correlation. Fixes the format to match real Antigravity traffic (`-{uuid}:{model}:{project}:seed-{hex16}` instead of the upstream bare numeric string).
+
+**User-Agent:** Each auth account gets its own deterministic, cached user-agent string with a realistic Antigravity version and platform combination (e.g., `antigravity/1.18.3 darwin/arm64`). Versions are fetched dynamically from the [Antigravity auto-updater API](https://antigravity-auto-updater-974169037036.us-central1.run.app) every 12 hours so the proxy always advertises the current stable release — just like real users who auto-update. Per-account version tracking ensures accounts never downgrade to an older version if a fetch fails and the static fallback pool is used. Falls back gracefully to a static version pool (`1.16.5`–`1.18.3`) if the API is unreachable.
+
+**Project ID:** Expands the fallback random project name word pools from 5×5 (25 combinations) to 30×30 (900 combinations), dramatically reducing the chance of two accounts generating the same project name.
 
 ### Direct Source Changes (not patches)
 

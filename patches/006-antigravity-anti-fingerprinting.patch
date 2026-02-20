@@ -1,4 +1,4 @@
-# PATCH 006: Antigravity anti-fingerprinting
+# PATCH 006: Antigravity anti-fingerprinting + dynamic version fetching
 #
 # Fixes three fingerprinting vectors in the Antigravity executor:
 #
@@ -6,12 +6,17 @@
 #    fix format to match real traffic (-{uuid}:{model}:{project}:seed-{hex16})
 #
 # 2. User-Agent: Fix version format (use Antigravity's own version, not VS Code's),
-#    generate per-account UA with varied version/platform, cache for consistency
+#    generate deterministic per-account UAs with platform diversity.
+#    Dynamic version fetching from the Antigravity auto-updater API every 12 hours
+#    with graceful fallback to static version pool.
+#    Per-account version tracking prevents version downgrades — once an account
+#    uses a newer version, it will never fall back to an older one.
 #
-# 3. Project ID: Expand word pools from 5x5 (25 combos) to 30x30 (900 combos)
+# 3. Project ID: Expand word pools from ~10 to ~30 adjectives/nouns for
+#    more realistic random project names.
 #
---- a/internal/runtime/executor/antigravity_executor.go	2026-02-20 22:24:33.687612958 +0000
-+++ b/internal/runtime/executor/antigravity_executor.go	2026-02-20 22:26:03.463968874 +0000
+--- a/internal/runtime/executor/antigravity_executor.go	2026-02-20 23:29:49.547119399 +0000
++++ b/internal/runtime/executor/antigravity_executor.go	2026-02-20 23:29:49.531119336 +0000
 @@ -9,6 +9,7 @@
  	"context"
  	"crypto/sha256"
@@ -20,7 +25,15 @@
  	"encoding/json"
  	"errors"
  	"fmt"
-@@ -45,7 +46,7 @@
+@@ -16,6 +17,7 @@
+ 	"math/rand"
+ 	"net/http"
+ 	"net/url"
++	"regexp"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
+@@ -45,17 +47,114 @@
  	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
  	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
  	antigravityClientSecret        = "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"
@@ -29,7 +42,13 @@
  	antigravityAuthType            = "antigravity"
  	refreshSkew                    = 3000 * time.Second
  	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
-@@ -54,6 +55,12 @@
+ )
+ 
++const (
++	antigravityVersionURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app"
++	antigravityVersionRefresh = 12 * time.Hour
++)
++
  var (
  	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
  	randSourceMutex sync.Mutex
@@ -37,12 +56,100 @@
 +	antigravityUACache      = make(map[string]string)
 +	antigravityUACacheMutex sync.RWMutex
 +
++	// Per-account last-used version to prevent version downgrades
++	antigravityAccountVersions   = make(map[string]string)
++	antigravityAccountVersionsMu sync.RWMutex
++
 +	antigravityUAVersions  = []string{"1.16.5", "1.17.0", "1.17.2", "1.18.0", "1.18.3"}
 +	antigravityUAPlatforms = []string{"win32/x64", "darwin/arm64", "linux/x64", "linux/arm64"}
++
++	antigravityDynVersion      string
++	antigravityDynVersionMu    sync.RWMutex
++	antigravityDynVersionAt    time.Time
++	antigravityVersionRe       = regexp.MustCompile(`\d+\.\d+\.\d+`)
  )
  
++func fetchAntigravityVersion() string {
++	antigravityDynVersionMu.RLock()
++	v := antigravityDynVersion
++	t := antigravityDynVersionAt
++	antigravityDynVersionMu.RUnlock()
++	if v != "" && time.Since(t) < antigravityVersionRefresh {
++		return v
++	}
++
++	client := &http.Client{Timeout: 5 * time.Second}
++	resp, err := client.Get(antigravityVersionURL)
++	if err != nil {
++		if v != "" {
++			return v
++		}
++		return ""
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		if v != "" {
++			return v
++		}
++		return ""
++	}
++	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
++	if err != nil {
++		if v != "" {
++			return v
++		}
++		return ""
++	}
++	parsed := antigravityVersionRe.FindString(string(body))
++	if parsed == "" {
++		if v != "" {
++			return v
++		}
++		return ""
++	}
++
++	antigravityDynVersionMu.Lock()
++	antigravityDynVersion = parsed
++	antigravityDynVersionAt = time.Now()
++	// Clear UA cache so all accounts pick up the new version
++	if v != parsed {
++		antigravityUACacheMutex.Lock()
++		antigravityUACache = make(map[string]string)
++		antigravityUACacheMutex.Unlock()
++	}
++	antigravityDynVersionMu.Unlock()
++
++	log.Infof("[antigravity] fetched dynamic version: %s", parsed)
++	return parsed
++}
++
++// compareVersions compares two semver-style version strings (e.g. "1.18.3").
++// Returns -1 if a < b, 0 if a == b, 1 if a > b.
++func compareVersions(a, b string) int {
++	partsA := strings.SplitN(a, ".", 3)
++	partsB := strings.SplitN(b, ".", 3)
++	for i := 0; i < 3; i++ {
++		var na, nb int
++		if i < len(partsA) {
++			na, _ = strconv.Atoi(partsA[i])
++		}
++		if i < len(partsB) {
++			nb, _ = strconv.Atoi(partsB[i])
++		}
++		if na < nb {
++			return -1
++		}
++		if na > nb {
++			return 1
++		}
++	}
++	return 0
++}
++
  // AntigravityExecutor proxies requests to the antigravity upstream.
-@@ -1290,7 +1297,11 @@
+ type AntigravityExecutor struct {
+ 	cfg *config.Config
+@@ -1290,7 +1389,11 @@
  			projectID = strings.TrimSpace(pid)
  		}
  	}
@@ -55,7 +162,7 @@
  	payload, _ = sjson.SetBytes(payload, "model", modelName)
  
  	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-high")
-@@ -1342,9 +1353,8 @@
+@@ -1342,9 +1445,8 @@
  		httpReq.Host = host
  	}
  
@@ -66,7 +173,7 @@
  		authLabel = auth.Label
  		authType, authValue = auth.AccountInfo()
  	}
-@@ -1455,6 +1465,22 @@
+@@ -1455,6 +1557,39 @@
  				return strings.TrimSpace(ua)
  			}
  		}
@@ -77,10 +184,27 @@
 +			if ok {
 +				return ua
 +			}
++			// Try dynamic version first; fall back to deterministic static pick
++			version := fetchAntigravityVersion()
++			if version == "" {
++				h := sha256.Sum256([]byte(auth.ID + "ua-salt"))
++				vIdx := int(binary.BigEndian.Uint32(h[:4])) % len(antigravityUAVersions)
++				version = antigravityUAVersions[vIdx]
++			}
++			// Prevent version downgrades: never use a version older than last used
++			antigravityAccountVersionsMu.RLock()
++			lastVer := antigravityAccountVersions[auth.ID]
++			antigravityAccountVersionsMu.RUnlock()
++			if lastVer != "" && compareVersions(version, lastVer) < 0 {
++				version = lastVer
++			}
++			// Record this version as last used for the account
++			antigravityAccountVersionsMu.Lock()
++			antigravityAccountVersions[auth.ID] = version
++			antigravityAccountVersionsMu.Unlock()
 +			h := sha256.Sum256([]byte(auth.ID + "ua-salt"))
-+			vIdx := int(binary.BigEndian.Uint32(h[:4])) % len(antigravityUAVersions)
 +			pIdx := int(binary.BigEndian.Uint32(h[4:8])) % len(antigravityUAPlatforms)
-+			ua = fmt.Sprintf("antigravity/%s %s", antigravityUAVersions[vIdx], antigravityUAPlatforms[pIdx])
++			ua = fmt.Sprintf("antigravity/%s %s", version, antigravityUAPlatforms[pIdx])
 +			antigravityUACacheMutex.Lock()
 +			antigravityUACache[auth.ID] = ua
 +			antigravityUACacheMutex.Unlock()
@@ -89,7 +213,7 @@
  	}
  	return defaultAntigravityAgent
  }
-@@ -1546,7 +1572,7 @@
+@@ -1546,7 +1681,7 @@
  	return ""
  }
  
@@ -98,7 +222,7 @@
  	template, _ := sjson.Set(string(payload), "model", modelName)
  	template, _ = sjson.Set(template, "userAgent", "antigravity")
  	template, _ = sjson.Set(template, "requestType", "agent")
-@@ -1555,10 +1581,11 @@
+@@ -1555,10 +1690,11 @@
  	if projectID != "" {
  		template, _ = sjson.Set(template, "project", projectID)
  	} else {
@@ -112,7 +236,7 @@
  
  	template, _ = sjson.Delete(template, "request.safetySettings")
  	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(template, "request.toolConfig").Exists() {
-@@ -1579,26 +1606,59 @@
+@@ -1579,26 +1715,59 @@
  	return "-" + strconv.FormatInt(n, 10)
  }
  
