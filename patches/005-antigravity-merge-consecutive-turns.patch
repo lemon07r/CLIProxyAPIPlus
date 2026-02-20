@@ -1,4 +1,4 @@
-# PATCH 007: Merge consecutive same-role turns for Gemini API compatibility
+# PATCH 005: Merge consecutive same-role turns for Gemini API compatibility
 #
 # The Gemini API rejects requests with consecutive messages from the same role.
 # This patch merges consecutive user or model turns into a single turn by

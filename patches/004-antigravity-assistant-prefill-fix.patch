@@ -1,4 +1,4 @@
-# PATCH 006: Handle assistant message prefill for Claude models via Antigravity
+# PATCH 004: Handle assistant message prefill for Claude models via Antigravity
 #
 # When clients (e.g. opencode, Claude Code) send a Claude API request with
 # assistant prefill (last message has role "assistant" with partial content),

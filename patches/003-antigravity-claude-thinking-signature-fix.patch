@@ -1,4 +1,4 @@
-# PATCH 004: Fix thinking signature handling for all models via Antigravity Gemini translator
+# PATCH 003: Fix thinking signature handling for all models via Antigravity Gemini translator
 #
 # When models are accessed through the Gemini v1beta endpoint and routed to
 # Antigravity, thinking blocks from previous conversation turns may carry

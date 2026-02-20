@@ -17,14 +17,17 @@ Updates GitHub Copilot executor headers for premium model requests. Sets `X-Init
 ### 002 - Copilot Claude & GPT-5.3 Endpoint Support
 Adds native Claude API and GPT-5.3 `/responses` endpoint support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Routes GPT-5.3 models to the `/responses` endpoint with codex format translation, including custom responses→Claude stream/non-stream translators for clients that speak Claude format. Strips the `copilot-` alias prefix from model names before sending requests upstream. Adds SSE passthrough newline preservation for claude→claude streaming when no response translator is registered. Includes smarter streaming usage parsing with fallback from OpenAI to Claude format when `TotalTokens` is zero.
 
-### 004 - Antigravity Thinking Signature Fix
+### 003 - Antigravity Thinking Signature Fix
 Fixes thinking signature handling in the Antigravity Gemini translator for multi-turn conversations. For Gemini models, applies the `skip_thought_signature_validator` sentinel. For Claude models, strips thinking blocks from previous assistant turns instead (Claude rejects the sentinel as an invalid signature). Also cleans up snake_case `thought_signature` fields that clients like `@ai-sdk/google` may send, preventing stale cross-provider signatures from passing through.
 
-### 006 - Antigravity Assistant Prefill Fix
+### 004 - Antigravity Assistant Prefill Fix
 Handles Claude assistant message prefill for the Antigravity backend. Claude clients (opencode, Claude Code, etc.) send a trailing assistant message with partial content to guide the model's response — a Claude-specific feature the Antigravity/Gemini API rejects. This patch detects trailing model messages (that aren't tool-use turns), extracts the prefill text, and replaces them with a synthetic user message (`"Continue from: <prefill>"`) to preserve the intent. Scoped to Claude models only — native Gemini models are unaffected.
 
-### 007 - Antigravity Merge Consecutive Turns
+### 005 - Antigravity Merge Consecutive Turns
 Merges consecutive same-role turns in the Antigravity Gemini translator before sending requests to the Gemini API. The Gemini API requires strict `user` → `model` → `user` → `model` alternation — consecutive turns with the same role cause an `INVALID_ARGUMENT` error. This patch detects adjacent turns sharing a role and combines their `parts` arrays into a single turn, preserving all content while satisfying the API constraint. Commonly triggered by long multi-turn conversations where the OpenAI/Claude → Gemini translation produces back-to-back model messages.
+
+### 006 - Antigravity Anti-Fingerprinting
+Fixes three fingerprinting vectors in the Antigravity executor. **Session ID:** Salts with auth token ID to prevent cross-account correlation and fixes the format to match real traffic (`-{uuid}:{model}:{project}:seed-{hex16}` instead of a bare numeric string). **User-Agent:** Replaces the incorrect `antigravity/1.104.0` (VS Code base version) with real Antigravity plugin versions (`1.16.5`–`1.18.3`), varies platform per auth token, and caches for consistency. **Project ID:** Expands fallback word pools from 5×5 (25 combinations) to 30×30 (900 combinations) to reduce collision probability.
 
 ### Direct Source Changes (not patches)
 
