@@ -1,12 +1,12 @@
-# PATCH 002: Route Copilot models to correct endpoints (Claude→/v1/messages, GPT-5→/responses)
+# PATCH 002: Route Copilot Claude models to /v1/messages and GPT-5 models to /responses
 #
-# Uses "codex" translator for GPT-5 models (responses API), "claude" for Claude models
-# (Messages API), and "openai" for others (chat completions).
-# Handles thinking/budget_tokens for Claude, skips OpenAI-specific processing for Claude,
-# parses Claude usage stats, and adds anthropic-beta header.
+# Uses "codex" translator for GPT-5 models (Responses API format with input/max_output_tokens),
+# "claude" translator for Claude models (Messages API), and "openai" for others (chat completions).
+# Adds isGPT5Model routing, Claude endpoint support, applyHeaders format parameter,
+# normalizeCopilotClaudeThinking, and anthropic-beta header for Claude models.
 # Applies to both Execute (non-streaming) and ExecuteStream (streaming) paths.
---- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:50:33.934437293 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:51:42.002702586 +0000
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:14:13.084027833 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 18:14:25.668077484 +0000
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
@@ -274,7 +274,25 @@
  }
  
  // detectVisionContent checks if the request body contains vision/image content.
-@@ -544,6 +564,79 @@
+@@ -525,11 +545,14 @@
+ 	return false
+ }
+ 
+-// normalizeModel strips the suffix (e.g. "(medium)") from the model name
+-// before sending to GitHub Copilot, as the upstream API does not accept
+-// suffixed model identifiers.
++// normalizeModel strips the suffix (e.g. "(medium)") and the "copilot-" alias
++// prefix from the model name before sending to GitHub Copilot, as the upstream
++// API does not accept suffixed or prefixed model identifiers.
+ func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
+ 	baseModel := thinking.ParseSuffix(model).ModelName
++	if strings.HasPrefix(baseModel, "copilot-") {
++		baseModel = strings.TrimPrefix(baseModel, "copilot-")
++	}
+ 	if baseModel != model {
+ 		body, _ = sjson.SetBytes(body, "model", baseModel)
+ 	}
+@@ -544,6 +567,79 @@
  	return strings.Contains(baseModel, "codex")
  }
  
