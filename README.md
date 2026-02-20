@@ -14,17 +14,11 @@ Automated Docker builds for arm64 are available here: https://hub.docker.com/r/l
 ### 001 - Copilot Premium Requests
 Updates GitHub Copilot executor headers for premium model requests. Sets `X-Initiator: agent` unconditionally, updates editor/plugin version strings, and adds per-request randomized session/machine IDs to mimic VSCode extension behavior.
 
-### 002 - Copilot Claude Endpoint Support
-Adds native Claude API support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Removes unsupported `stream_options` and skips OpenAI-specific content processing for Claude requests.
-
-### 003 - Kimi K2.5 Context Length Fix
-Corrects the `kimi-k2.5` context window from 131,072 to 262,144 (256K) tokens in the static model definitions. The upstream value was too low — Kimi K2.5 supports a 256K context window.
+### 002 - Copilot Claude & GPT-5.3 Endpoint Support
+Adds native Claude API and GPT-5.3 `/responses` endpoint support to the GitHub Copilot executor. Routes Claude models (`copilot-claude-*`) to Copilot's `/v1/messages` endpoint with proper format translation, Claude-specific usage parsing, thinking/reasoning budget normalization, and `anthropic-beta` headers. Routes GPT-5.3 models to the `/responses` endpoint with codex format translation, including custom responses→Claude stream/non-stream translators for clients that speak Claude format. Strips the `copilot-` alias prefix from model names before sending requests upstream. Adds SSE passthrough newline preservation for claude→claude streaming when no response translator is registered. Includes smarter streaming usage parsing with fallback from OpenAI to Claude format when `TotalTokens` is zero.
 
 ### 004 - Antigravity Thinking Signature Fix
 Fixes thinking signature handling in the Antigravity Gemini translator for multi-turn conversations. For Gemini models, applies the `skip_thought_signature_validator` sentinel. For Claude models, strips thinking blocks from previous assistant turns instead (Claude rejects the sentinel as an invalid signature). Also cleans up snake_case `thought_signature` fields that clients like `@ai-sdk/google` may send, preventing stale cross-provider signatures from passing through.
-
-### 005 - Copilot Alias Prefix Stripping
-Strips the `copilot-` alias prefix from model names before sending requests to GitHub Copilot's upstream API. When `oauth-model-alias` creates forked models (e.g., `copilot-gpt-5.2` from `gpt-5.2`), the alias flows through as the model name. Copilot's API only accepts the original name, so this patch updates `normalizeModel` to strip the prefix.
 
 ### 006 - Antigravity Assistant Prefill Fix
 Handles Claude assistant message prefill for the Antigravity backend. Claude clients (opencode, Claude Code, etc.) send a trailing assistant message with partial content to guide the model's response — a Claude-specific feature the Antigravity/Gemini API rejects. This patch detects trailing model messages (that aren't tool-use turns), extracts the prefill text, and replaces them with a synthetic user message (`"Continue from: <prefill>"`) to preserve the intent. Scoped to Claude models only — native Gemini models are unaffected.
