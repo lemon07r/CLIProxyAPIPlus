@@ -1,11 +1,13 @@
-# PATCH 001: Spoof headers for unlimited premium Copilot requests
+# PATCH 001: Spoof Copilot headers for unlimited access
 #
-# Updates User-Agent/Editor-Version/Plugin-Version to newer values.
-# Forces X-Initiator to "agent" (bypasses premium quota).
-# Adds random VScode-SessionId/MachineId per request.
-# Adds copilotThinkingBeta constant for Claude thinking support.
---- a/internal/runtime/executor/github_copilot_executor.go
-+++ b/internal/runtime/executor/github_copilot_executor.go
+# Updates GitHub Copilot API headers to spoof premium/unlimited access:
+# - User-Agent, Editor-Version, Plugin-Version updated to latest
+# - OpenAI-Intent set to "conversation-edits" (matches latest Copilot)
+# - API version updated to 2025-10-01
+# - Forces X-Initiator to "agent" (bypasses dynamic logic)
+# - Adds random VScode-SessionId and VScode-MachineId
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:40:39.585967273 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:40:39.589967289 +0000
 @@ -35,12 +35,14 @@
  	maxScannerBufferSize = 20_971_520
  
@@ -17,8 +19,10 @@
 +	copilotEditorVersion = "vscode/1.109.0-20260124"
 +	copilotPluginVersion = "copilot-chat/0.37.2026013101"
  	copilotIntegrationID = "vscode-chat"
- 	copilotOpenAIIntent  = "conversation-panel"
- 	copilotGitHubAPIVer  = "2025-04-01"
+-	copilotOpenAIIntent  = "conversation-panel"
+-	copilotGitHubAPIVer  = "2025-04-01"
++	copilotOpenAIIntent  = "conversation-edits"
++	copilotGitHubAPIVer  = "2025-10-01"
 +	// Additional headers for unlimited premium requests
 +	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
  )
