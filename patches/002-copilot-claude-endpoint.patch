@@ -6,8 +6,8 @@
 # Handles thinking/budget_tokens, skips OpenAI-specific processing for Claude,
 # parses Claude usage stats, and adds anthropic-beta header.
 # Applies to both Execute (non-streaming) and ExecuteStream (streaming) paths.
---- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:14:16.197835978 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:16:47.138434116 +0000
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:20:20.171278310 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 17:20:20.175278326 +0000
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
@@ -16,6 +16,15 @@
  	githubCopilotAuthType      = "github-copilot"
  	githubCopilotTokenCacheTTL = 25 * time.Minute
  	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
+@@ -83,7 +84,7 @@
+ 	if errToken != nil {
+ 		return errToken
+ 	}
+-	e.applyHeaders(req, apiToken, nil)
++	e.applyHeaders(req, apiToken, sdktranslator.Format(""), nil)
+ 	return nil
+ }
+ 
 @@ -114,11 +115,15 @@
  	defer reporter.trackFailure(ctx, &err)
  
