@@ -141,6 +141,8 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if useResponses {
 		body = normalizeGitHubCopilotResponsesInput(body)
 		body = normalizeGitHubCopilotResponsesTools(body)
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+		body = filterResponsesReasoningItems(body)
 	} else {
 		body = normalizeGitHubCopilotChatTools(body)
 	}
@@ -271,6 +273,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if useResponses {
 		body = normalizeGitHubCopilotResponsesInput(body)
 		body = normalizeGitHubCopilotResponsesTools(body)
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+		body = filterResponsesReasoningItems(body)
 	} else {
 		body = normalizeGitHubCopilotChatTools(body)
 	}
@@ -795,6 +799,31 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	// Remove messages/system since we've converted them to input
 	body, _ = sjson.DeleteBytes(body, "messages")
 	body, _ = sjson.DeleteBytes(body, "system")
+	return body
+}
+
+// filterResponsesReasoningItems removes reasoning items from the input array.
+// The Copilot API returns store=false, so reasoning item IDs from previous
+// responses cannot be referenced. OpenCode sends these back in follow-up
+// requests, causing "item not found" errors.
+func filterResponsesReasoningItems(body []byte) []byte {
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body
+	}
+	filtered := "[]"
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "reasoning" {
+			changed = true
+			continue
+		}
+		filtered, _ = sjson.SetRaw(filtered, "-1", item.Raw)
+	}
+	if !changed {
+		return body
+	}
+	body, _ = sjson.SetRawBytes(body, "input", []byte(filtered))
 	return body
 }
 
