@@ -532,12 +532,14 @@ func detectVisionContent(body []byte) bool {
 	return false
 }
 
-// normalizeModel strips the suffix (e.g. "(medium)") from the model name
-// before sending to GitHub Copilot, as the upstream API does not accept
-// suffixed model identifiers.
+// normalizeModel ensures the model field in the request body matches the
+// resolved upstream model name (without thinking suffixes or alias prefixes).
+// GitHub Copilot's API requires the actual model name (e.g. "gpt-5.3-codex"),
+// not the client-facing alias (e.g. "copilot-gpt-5.3-codex").
 func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
 	baseModel := thinking.ParseSuffix(model).ModelName
-	if baseModel != model {
+	bodyModel := gjson.GetBytes(body, "model").String()
+	if baseModel != bodyModel {
 		body, _ = sjson.SetBytes(body, "model", baseModel)
 	}
 	return body
