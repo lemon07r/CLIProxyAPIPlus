@@ -1,8 +1,9 @@
-# PATCH 002: Copilot Claude endpoint routing and thinking support
+# PATCH 002: Copilot Claude endpoint routing, thinking support, and copilot- prefix handling
 #
 # Routes Claude models (opus-4, sonnet-4, etc.) to /v1/messages endpoint
 # with Claude-native format. Enables thinking/reasoning with sensible defaults.
-# Routes GPT-5.3 models to /responses endpoint. Strips copilot- prefix.
+# Routes GPT-5.3 models to /responses endpoint. Strips copilot- prefix from
+# model names in registry lookups, provider resolution, and upstream requests.
 # Adds SSE passthrough for Claude streaming, usage fallback, and
 # convertPlainClaudeResponseToOpenAI for non-streaming responses.
 #
@@ -313,7 +314,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  }
  
  // detectVisionContent checks if the request body contains vision/image content.
-@@ -544,25 +569,82 @@
+@@ -544,25 +569,83 @@
  	return false
  }
  
@@ -325,12 +326,12 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +// from model names before sending to GitHub Copilot API.
  func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
 -	baseModel := thinking.ParseSuffix(model).ModelName
--	bodyModel := gjson.GetBytes(body, "model").String()
--	if baseModel != bodyModel {
--		body, _ = sjson.SetBytes(body, "model", baseModel)
 +	normalized := strings.TrimPrefix(model, "copilot-")
 +	normalized = thinking.ParseSuffix(normalized).ModelName
-+	if normalized != model {
+ 	bodyModel := gjson.GetBytes(body, "model").String()
+-	if baseModel != bodyModel {
+-		body, _ = sjson.SetBytes(body, "model", baseModel)
++	if normalized != bodyModel {
 +		body, _ = sjson.SetBytes(body, "model", normalized)
  	}
  	return body
@@ -594,3 +595,76 @@ diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_re
 +
 +	return out
  }
+diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
+--- a/sdk/api/handlers/handlers.go
++++ b/sdk/api/handlers/handlers.go
+@@ -766,6 +766,17 @@
+ 	if len(providers) == 0 && baseModel != resolvedModelName {
+ 		providers = util.GetProviderName(resolvedModelName)
+ 	}
++	// Fallback: strip "copilot-" prefix for models sent with that prefix
++	// (e.g. "copilot-gpt-5.3-codex" → "gpt-5.3-codex") since the registry
++	// stores them without the prefix.
++	if len(providers) == 0 && strings.HasPrefix(strings.ToLower(baseModel), "copilot-") {
++		stripped := baseModel[len("copilot-"):]
++		providers = util.GetProviderName(stripped)
++		if len(providers) > 0 {
++			// Also normalize the model name so downstream sees the registry name
++			resolvedModelName = stripped
++		}
++	}
+ 
+ 	if len(providers) == 0 {
+ 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+diff --git a/sdk/api/handlers/openai/endpoint_compat.go b/sdk/api/handlers/openai/endpoint_compat.go
+--- a/sdk/api/handlers/openai/endpoint_compat.go
++++ b/sdk/api/handlers/openai/endpoint_compat.go
+@@ -1,6 +1,10 @@
+ package openai
+ 
+-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
++import (
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
++)
+ 
+ const (
+ 	openAIChatEndpoint      = "/chat/completions"
+@@ -11,7 +15,12 @@
+ 	if modelName == "" {
+ 		return "", false
+ 	}
+-	info := registry.GetGlobalRegistry().GetModelInfo(modelName, "")
++	// Strip "copilot-" prefix so registry lookup matches (e.g. "copilot-gpt-5.3-codex" → "gpt-5.3-codex")
++	lookupName := strings.TrimPrefix(strings.ToLower(modelName), "copilot-")
++	info := registry.GetGlobalRegistry().GetModelInfo(lookupName, "")
++	if info == nil {
++		info = registry.GetGlobalRegistry().GetModelInfo(modelName, "")
++	}
+ 	if info == nil || len(info.SupportedEndpoints) == 0 {
+ 		return "", false
+ 	}
+diff --git a/sdk/api/handlers/openai/openai_handlers.go b/sdk/api/handlers/openai/openai_handlers.go
+--- a/sdk/api/handlers/openai/openai_handlers.go
++++ b/sdk/api/handlers/openai/openai_handlers.go
+@@ -11,6 +11,7 @@
+ 	"encoding/json"
+ 	"fmt"
+ 	"net/http"
++	"strings"
+ 	"sync"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -115,6 +116,11 @@
+ 
+ 	modelName := gjson.GetBytes(rawJSON, "model").String()
+ 	if overrideEndpoint, ok := resolveEndpointOverride(modelName, openAIChatEndpoint); ok && overrideEndpoint == openAIResponsesEndpoint {
++		// Strip "copilot-" prefix so downstream handlers and executors see the registry name
++		if strings.HasPrefix(strings.ToLower(modelName), "copilot-") {
++			modelName = modelName[len("copilot-"):]
++			rawJSON, _ = sjson.SetBytes(rawJSON, "model", modelName)
++		}
+ 		originalChat := rawJSON
+ 		if shouldTreatAsResponsesFormat(rawJSON) {
+ 			// Already responses-style payload; no conversion needed.
