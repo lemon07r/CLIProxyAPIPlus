@@ -37,12 +37,6 @@ Comprehensive anti-fingerprinting for the Antigravity executor — goes well bey
 
 **Project ID:** Expands the fallback random project name word pools from 5×5 (25 combinations) to 30×30 (900 combinations), dramatically reducing the chance of two accounts generating the same project name.
 
-### Direct Source Changes (not patches)
-
-These changes are committed directly to the fork's Go source and maintained across upstream merges:
-
-- **Antigravity thinking translation fix**: Removed the `enableThoughtTranslate` flag from `antigravity_claude_request.go`. Upstream sets this flag to `false` when any unsigned thinking block is encountered, which globally disables thinking config for the entire request. Our fix drops unsigned blocks individually instead, so thinking remains enabled for the current model even when stale blocks from a previous model switch are present.
-
 ---
 
 ## Example Configs

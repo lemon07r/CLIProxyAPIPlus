@@ -1,5 +1,14 @@
---- a/b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 21:41:34.777414236 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 21:41:51.773481471 +0000
+# PATCH 002: Copilot Claude endpoint routing and thinking support
+#
+# Routes Claude models (opus-4, sonnet-4, etc.) to /v1/messages endpoint
+# with Claude-native format. Enables thinking/reasoning with sensible defaults.
+# Routes GPT-5.3 models to /responses endpoint. Strips copilot- prefix.
+# Adds SSE passthrough for Claude streaming, usage fallback, and
+# convertPlainClaudeResponseToOpenAI for non-streaming responses.
+#
+diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+--- a/internal/runtime/executor/github_copilot_executor.go
++++ b/internal/runtime/executor/github_copilot_executor.go
 @@ -27,6 +27,7 @@
  	githubCopilotBaseURL       = "https://api.githubcopilot.com"
  	githubCopilotChatPath      = "/chat/completions"
@@ -8,7 +17,23 @@
  	githubCopilotAuthType      = "github-copilot"
  	githubCopilotTokenCacheTTL = 25 * time.Minute
  	// tokenExpiryBuffer is the time before expiry when we should refresh the token.
-@@ -83,7 +84,7 @@
+@@ -35,14 +36,13 @@
+ 	maxScannerBufferSize = 20_971_520
+ 
+ 	// Copilot API header values.
++	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
+ 	copilotUserAgent     = "GithubCopilot/1.0"
+ 	copilotEditorVersion = "vscode/1.109.0-20260124"
+ 	copilotPluginVersion = "copilot-chat/0.37.2026013101"
+ 	copilotIntegrationID = "vscode-chat"
+ 	copilotOpenAIIntent  = "conversation-edits"
+ 	copilotGitHubAPIVer  = "2025-10-01"
+-	// Additional headers for unlimited premium requests
+-	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
+ )
+ 
+ // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
+@@ -83,7 +83,7 @@
  	if errToken != nil {
  		return errToken
  	}
@@ -17,7 +42,7 @@
  	return nil
  }
  
-@@ -114,11 +115,14 @@
+@@ -114,11 +114,14 @@
  	defer reporter.trackFailure(ctx, &err)
  
  	from := opts.SourceFormat
@@ -25,7 +50,7 @@
 -	to := sdktranslator.FromString("openai")
 -	if useResponses {
 -		to = sdktranslator.FromString("openai-response")
-+	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
++	useClaude := isCopilotClaudeModel(req.Model)
 +	toFormat := "openai"
 +	if useClaude {
 +		toFormat = "claude"
@@ -36,7 +61,7 @@
  	originalPayload := bytes.Clone(req.Payload)
  	if len(opts.OriginalRequest) > 0 {
  		originalPayload = bytes.Clone(opts.OriginalRequest)
-@@ -126,43 +130,47 @@
+@@ -126,45 +129,49 @@
  	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
  	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
  	body = e.normalizeModel(req.Model, body)
@@ -70,6 +95,8 @@
 +	if isGPT5Model(req.Model) {
  		body = normalizeGitHubCopilotResponsesInput(body)
  		body = normalizeGitHubCopilotResponsesTools(body)
+ 		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+ 		body = filterResponsesReasoningItems(body)
 -	} else {
 +	} else if !useClaude {
  		body = normalizeGitHubCopilotChatTools(body)
@@ -101,8 +128,14 @@
  		httpReq.Header.Set("Copilot-Vision-Request", "true")
  	}
  
-@@ -214,20 +222,15 @@
+@@ -216,25 +223,20 @@
  	appendAPIResponseChunk(ctx, e.cfg, data)
+ 
+ 	// Stabilize encrypted IDs in non-streaming Responses API output.
+-	if useResponses {
++	if isGPT5Model(req.Model) {
+ 		data = stabilizeResponsesNonStreamIDs(data)
+ 	}
  
  	detail := parseOpenAIUsage(data)
 -	if useResponses && detail.TotalTokens == 0 {
@@ -125,7 +158,7 @@
  	resp = cliproxyexecutor.Response{Payload: []byte(converted)}
  	reporter.ensurePublished(ctx)
  	return resp, nil
-@@ -244,11 +247,14 @@
+@@ -251,11 +253,14 @@
  	defer reporter.trackFailure(ctx, &err)
  
  	from := opts.SourceFormat
@@ -133,7 +166,7 @@
 -	to := sdktranslator.FromString("openai")
 -	if useResponses {
 -		to = sdktranslator.FromString("openai-response")
-+	useClaude := isCopilotClaudeModel(req.Model) && from == sdktranslator.FormatClaude
++	useClaude := isCopilotClaudeModel(req.Model)
 +	toFormat := "openai"
 +	if useClaude {
 +		toFormat = "claude"
@@ -144,7 +177,7 @@
  	originalPayload := bytes.Clone(req.Payload)
  	if len(opts.OriginalRequest) > 0 {
  		originalPayload = bytes.Clone(opts.OriginalRequest)
-@@ -256,47 +262,52 @@
+@@ -263,49 +268,54 @@
  	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
  	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
  	body = e.normalizeModel(req.Model, body)
@@ -178,6 +211,8 @@
  	if useResponses {
  		body = normalizeGitHubCopilotResponsesInput(body)
  		body = normalizeGitHubCopilotResponsesTools(body)
+ 		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+ 		body = filterResponsesReasoningItems(body)
 -	} else {
 +	} else if !useClaude {
  		body = normalizeGitHubCopilotChatTools(body)
@@ -215,17 +250,15 @@
  		httpReq.Header.Set("Copilot-Vision-Request", "true")
  	}
  
-@@ -355,6 +366,9 @@
+@@ -364,6 +374,7 @@
  		scanner := bufio.NewScanner(httpResp.Body)
  		scanner.Buffer(nil, maxScannerBufferSize)
  		var param any
-+		// When no response translator is registered, the stream is passed through
-+		// verbatim. The scanner strips newlines, so we need to re-add them.
 +		ssePassthrough := !sdktranslator.HasResponseTransformer(from, to)
- 
- 		for scanner.Scan() {
- 			line := scanner.Bytes()
-@@ -367,20 +381,33 @@
+ 		var idStabilizer *responsesIDStabilizer
+ 		if useResponses {
+ 			idStabilizer = newResponsesIDStabilizer()
+@@ -386,20 +397,31 @@
  					continue
  				}
  				if detail, ok := parseOpenAIStreamUsage(line); ok {
@@ -253,8 +286,6 @@
  			} else {
  				chunks = sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(line), &param)
  			}
-+			// When no response translator is registered (e.g. claude→claude passthrough),
-+			// raw scanner lines are returned without newlines. Append \n to preserve SSE framing.
 +			if ssePassthrough {
 +				for i := range chunks {
 +					chunks[i] = chunks[i] + "\n"
@@ -263,7 +294,7 @@
  			for i := range chunks {
  				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
  			}
-@@ -479,7 +506,7 @@
+@@ -498,7 +520,7 @@
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
@@ -272,7 +303,7 @@
  	r.Header.Set("Content-Type", "application/json")
  	r.Header.Set("Authorization", "Bearer "+apiToken)
  	r.Header.Set("Accept", "application/json")
-@@ -495,6 +522,9 @@
+@@ -514,6 +536,9 @@
  	r.Header.Set("X-Initiator", "agent")
  	r.Header.Set("VScode-SessionId", uuid.NewString())
  	r.Header.Set("VScode-MachineId", uuid.NewString())
@@ -282,27 +313,32 @@
  }
  
  // detectVisionContent checks if the request body contains vision/image content.
-@@ -525,14 +555,84 @@
+@@ -544,25 +569,82 @@
  	return false
  }
  
--// normalizeModel strips the suffix (e.g. "(medium)") from the model name
--// before sending to GitHub Copilot, as the upstream API does not accept
--// suffixed model identifiers.
+-// normalizeModel ensures the model field in the request body matches the
+-// resolved upstream model name (without thinking suffixes or alias prefixes).
+-// GitHub Copilot's API requires the actual model name (e.g. "gpt-5.3-codex"),
+-// not the client-facing alias (e.g. "copilot-gpt-5.3-codex").
 +// normalizeModel strips the "copilot-" prefix and any thinking suffix (e.g. "(medium)")
 +// from model names before sending to GitHub Copilot API.
  func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte {
 -	baseModel := thinking.ParseSuffix(model).ModelName
--	if baseModel != model {
+-	bodyModel := gjson.GetBytes(body, "model").String()
+-	if baseModel != bodyModel {
 -		body, _ = sjson.SetBytes(body, "model", baseModel)
 +	normalized := strings.TrimPrefix(model, "copilot-")
 +	normalized = thinking.ParseSuffix(normalized).ModelName
 +	if normalized != model {
 +		body, _ = sjson.SetBytes(body, "model", normalized)
-+	}
-+	return body
-+}
-+
+ 	}
+ 	return body
+ }
+ 
+-func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model string) bool {
+-	if sourceFormat.String() == "openai-response" {
+-		return true
 +func isGPT5Model(model string) bool {
 +	normalized := strings.TrimPrefix(model, "copilot-")
 +	return strings.HasPrefix(normalized, "gpt-5")
@@ -342,9 +378,6 @@
 +		return body
 +	}
 +	thinkingVal := gjson.GetBytes(body, "thinking")
-+	if !thinkingVal.Exists() {
-+		return body
-+	}
 +	thinkingType := strings.ToLower(strings.TrimSpace(thinkingVal.Get("type").String()))
 +	if thinkingType == "disabled" {
 +		return body
@@ -361,21 +394,67 @@
 +	}
 +	if budgetVal < 1024 {
 +		budgetVal = 1024
-+	}
+ 	}
+-	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
+-	return strings.Contains(baseModel, "codex")
 +	if budgetVal > 128000 {
 +		budgetVal = 128000
 +	}
 +	if budgetVal >= maxVal {
 +		budgetVal = maxVal - 1
- 	}
++	}
 +	body, _ = sjson.SetBytes(body, "thinking.type", "enabled")
 +	body, _ = sjson.SetBytes(body, "thinking.budget_tokens", budgetVal)
- 	return body
++	return body
  }
  
---- a/b/internal/runtime/executor/github_copilot_executor_test.go	2026-02-20 21:41:34.777414236 +0000
-+++ b/internal/runtime/executor/github_copilot_executor_test.go	2026-02-20 21:41:38.397428556 +0000
-@@ -256,9 +256,9 @@
+ // flattenAssistantContent converts assistant message content from array format
+diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/internal/runtime/executor/github_copilot_executor_test.go
+--- a/internal/runtime/executor/github_copilot_executor_test.go
++++ b/internal/runtime/executor/github_copilot_executor_test.go
+@@ -56,24 +56,29 @@
+ 	}
+ }
+ 
+-func TestUseGitHubCopilotResponsesEndpoint_OpenAIResponseSource(t *testing.T) {
++func TestIsGPT5Model(t *testing.T) {
+ 	t.Parallel()
+-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai-response"), "claude-3-5-sonnet") {
+-		t.Fatal("expected openai-response source to use /responses")
++	if !isGPT5Model("gpt-5-codex") {
++		t.Fatal("expected gpt-5-codex to be GPT5 model")
+ 	}
+-}
+-
+-func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
+-	t.Parallel()
+-	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5-codex") {
+-		t.Fatal("expected codex model to use /responses")
++	if !isGPT5Model("copilot-gpt-5-codex") {
++		t.Fatal("expected copilot-gpt-5-codex to be GPT5 model")
++	}
++	if isGPT5Model("claude-3-5-sonnet") {
++		t.Fatal("expected claude model not to be GPT5")
+ 	}
+ }
+ 
+-func TestUseGitHubCopilotResponsesEndpoint_DefaultChat(t *testing.T) {
++func TestIsCopilotClaudeModel(t *testing.T) {
+ 	t.Parallel()
+-	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "claude-3-5-sonnet") {
+-		t.Fatal("expected default openai source with non-codex model to use /chat/completions")
++	if !isCopilotClaudeModel("claude-3-5-sonnet") {
++		t.Fatal("expected claude-3-5-sonnet to be Claude model")
++	}
++	if !isCopilotClaudeModel("copilot-claude-sonnet-4") {
++		t.Fatal("expected copilot-claude-sonnet-4 to be Claude model")
++	}
++	if isCopilotClaudeModel("gpt-5-codex") {
++		t.Fatal("expected gpt-5 not to be Claude model")
+ 	}
+ }
+ 
+@@ -256,9 +261,9 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`)
@@ -388,7 +467,7 @@
  	}
  }
  
-@@ -268,7 +268,7 @@
+@@ -268,7 +273,7 @@
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// Claude Code typical flow: last message is user (tool result), but has assistant in history
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":"tool result here"}]}`)
@@ -397,7 +476,7 @@
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (assistant exists in messages)", got)
  	}
-@@ -279,7 +279,7 @@
+@@ -279,7 +284,7 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
@@ -406,7 +485,7 @@
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (tool role exists)", got)
  	}
-@@ -291,9 +291,9 @@
+@@ -291,9 +296,9 @@
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
@@ -419,3 +498,99 @@
  	}
  }
  
+diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_response.go b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
+--- a/internal/translator/claude/openai/chat-completions/claude_openai_response.go
++++ b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
+@@ -282,6 +282,15 @@
+ 		chunks = append(chunks, bytes.TrimSpace(line[5:]))
+ 	}
+ 
++	// If no SSE data lines found, check if this is a plain Claude JSON response
++	// (e.g. from Copilot's /v1/messages endpoint in non-streaming mode)
++	if len(chunks) == 0 {
++		root := gjson.ParseBytes(rawJSON)
++		if root.Get("type").String() == "message" {
++			return convertPlainClaudeResponseToOpenAI(root)
++		}
++	}
++
+ 	// Base OpenAI non-streaming response template
+ 	out := `{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
+ 
+@@ -433,4 +442,76 @@
+ 	}
+ 
+ 	return out
++}
++
++// convertPlainClaudeResponseToOpenAI converts a plain (non-SSE) Claude Messages API
++// response into OpenAI chat completion format. This handles responses from endpoints
++// like Copilot's /v1/messages when stream=false.
++func convertPlainClaudeResponseToOpenAI(root gjson.Result) string {
++	out := `{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`
++
++	out, _ = sjson.Set(out, "id", root.Get("id").String())
++	out, _ = sjson.Set(out, "created", time.Now().Unix())
++	out, _ = sjson.Set(out, "model", root.Get("model").String())
++
++	var contentParts []string
++	var reasoningParts []string
++	toolCallsCount := 0
++
++	content := root.Get("content")
++	if content.IsArray() {
++		for _, block := range content.Array() {
++			blockType := block.Get("type").String()
++			switch blockType {
++			case "text":
++				contentParts = append(contentParts, block.Get("text").String())
++			case "thinking":
++				reasoningParts = append(reasoningParts, block.Get("thinking").String())
++			case "tool_use":
++				idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
++				typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)
++				namePath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.name", toolCallsCount)
++				argumentsPath := fmt.Sprintf("choices.0.message.tool_calls.%d.function.arguments", toolCallsCount)
++				out, _ = sjson.Set(out, idPath, block.Get("id").String())
++				out, _ = sjson.Set(out, typePath, "function")
++				out, _ = sjson.Set(out, namePath, block.Get("name").String())
++				args := block.Get("input").Raw
++				if args == "" {
++					args = "{}"
++				}
++				out, _ = sjson.Set(out, argumentsPath, args)
++				toolCallsCount++
++			}
++		}
++	}
++
++	out, _ = sjson.Set(out, "choices.0.message.content", strings.Join(contentParts, ""))
++
++	if len(reasoningParts) > 0 {
++		out, _ = sjson.Set(out, "choices.0.message.reasoning", strings.Join(reasoningParts, ""))
++	}
++
++	stopReason := root.Get("stop_reason").String()
++	if toolCallsCount > 0 {
++		out, _ = sjson.Set(out, "choices.0.finish_reason", "tool_calls")
++	} else {
++		out, _ = sjson.Set(out, "choices.0.finish_reason", mapAnthropicStopReasonToOpenAI(stopReason))
++	}
++
++	// Map usage
++	usage := root.Get("usage")
++	if usage.Exists() {
++		inputTokens := usage.Get("input_tokens").Int()
++		outputTokens := usage.Get("output_tokens").Int()
++		cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
++		cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
++		out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
++		out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
++		out, _ = sjson.Set(out, "usage.total_tokens", inputTokens+outputTokens)
++		if cacheReadInputTokens > 0 {
++			out, _ = sjson.Set(out, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
++		}
++	}
++
++	return out
+ }
