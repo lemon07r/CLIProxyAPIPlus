@@ -1,0 +1,62 @@
+# PATCH 007: Fix vision/image detection for Responses API format
+#
+# detectVisionContent only checked the messages array (Chat Completions format)
+# for image content. When requests arrive in Responses API format (e.g. from
+# opencode/ai-sdk), the body uses an input array with input_image type blocks
+# instead. This patch extends detectVisionContent to also scan the input array,
+# ensuring the Copilot-Vision-Request header is set correctly for codex models.
+--- a/internal/runtime/executor/github_copilot_executor.go
++++ b/internal/runtime/executor/github_copilot_executor.go
+@@ -542,25 +542,37 @@
+ }
+ 
+ // detectVisionContent checks if the request body contains vision/image content.
+-// Returns true if the request includes image_url or image type content blocks.
++// Returns true if the request includes image_url, image, or input_image type content blocks.
++// Supports both OpenAI Chat Completions format (messages array) and Responses API format (input array).
+ func detectVisionContent(body []byte) bool {
+-	// Parse messages array
++	// Check messages array (OpenAI Chat Completions format)
+ 	messagesResult := gjson.GetBytes(body, "messages")
+-	if !messagesResult.Exists() || !messagesResult.IsArray() {
+-		return false
++	if messagesResult.Exists() && messagesResult.IsArray() {
++		for _, message := range messagesResult.Array() {
++			content := message.Get("content")
++			if content.IsArray() {
++				for _, block := range content.Array() {
++					blockType := block.Get("type").String()
++					if blockType == "image_url" || blockType == "image" {
++						return true
++					}
++				}
++			}
++		}
+ 	}
+ 
+-	// Check each message for vision content
+-	for _, message := range messagesResult.Array() {
+-		content := message.Get("content")
+-
+-		// If content is an array, check each content block
+-		if content.IsArray() {
+-			for _, block := range content.Array() {
+-				blockType := block.Get("type").String()
+-				// Check for image_url or image type
+-				if blockType == "image_url" || blockType == "image" {
+-					return true
++	// Check input array (OpenAI Responses API format)
++	inputResult := gjson.GetBytes(body, "input")
++	if inputResult.Exists() && inputResult.IsArray() {
++		for _, item := range inputResult.Array() {
++			// Check message items with content arrays
++			content := item.Get("content")
++			if content.IsArray() {
++				for _, block := range content.Array() {
++					blockType := block.Get("type").String()
++					if blockType == "input_image" || blockType == "image_url" || blockType == "image" {
++						return true
++					}
+ 				}
+ 			}
+ 		}
