@@ -37,6 +37,9 @@ Comprehensive anti-fingerprinting for the Antigravity executor — goes well bey
 
 **Project ID:** Expands the fallback random project name word pools from 5×5 (25 combinations) to 30×30 (900 combinations), dramatically reducing the chance of two accounts generating the same project name.
 
+### 007 - Copilot Responses Vision Detection
+Extends `detectVisionContent` in the GitHub Copilot executor to support the Responses API input format. The original function only checked the `messages` array (Chat Completions format) for image content, so clients like opencode's `@ai-sdk/openai` that send Responses API format with `input` array containing `input_image` blocks never triggered the `Copilot-Vision-Request: true` header — causing models like GPT-5.3 codex to reject image inputs. This patch adds detection for `input_image`, `image_url`, and `image` content types in the `input` array alongside the existing `messages` check.
+
 ---
 
 ## Example Configs
