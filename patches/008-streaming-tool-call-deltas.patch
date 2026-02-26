@@ -1,0 +1,98 @@
+# PATCH 008: Stream tool call deltas incrementally in Claude-to-OpenAI translator
+#
+# Previously, the Claude-to-OpenAI streaming translator accumulated tool_use
+# arguments silently (returning empty chunks at content_block_start and
+# input_json_delta events) and only emitted the complete tool call as a single
+# chunk at content_block_stop. This caused clients using the OpenAI endpoint
+# to not show "in progress" indicators for tool calls (e.g. "preparing write"),
+# since they never received incremental tool_call deltas during streaming.
+#
+# This patch changes the behavior to match OpenAI's native streaming format:
+# - content_block_start (tool_use): Immediately emits the tool call header
+#   (id, name, type) so clients can show the tool call is in progress
+# - input_json_delta: Streams each argument fragment as a separate chunk
+#   with tool_calls[].function.arguments containing the partial JSON
+# - content_block_stop: Only cleans up the accumulator (no output needed)
+#
+# This matches how the Responses API translator already handles tool calls
+# (response.output_item.added + response.function_call_arguments.delta).
+#
+# Applies after: 002-copilot-claude-endpoint.patch
+diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_response.go b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
+--- a/internal/translator/claude/openai/chat-completions/claude_openai_response.go
++++ b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
+@@ -113,7 +113,7 @@
+ 			blockType := contentBlock.Get("type").String()
+ 
+ 			if blockType == "tool_use" {
+-				// Start of tool call - initialize accumulator to track arguments
++				// Start of tool call - emit header (id + name) immediately for streaming progress
+ 				toolCallID := contentBlock.Get("id").String()
+ 				toolName := contentBlock.Get("name").String()
+ 				index := int(root.Get("index").Int())
+@@ -127,8 +127,13 @@
+ 					Name: toolName,
+ 				}
+ 
+-				// Don't output anything yet - wait for complete tool call
+-				return []string{}
++				// Emit the tool call header so clients can show progress immediately
++				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.index", index)
++				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.id", toolCallID)
++				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.type", "function")
++				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.name", toolName)
++				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.arguments", "")
++				return []string{template}
+ 			}
+ 		}
+ 		return []string{}
+@@ -153,16 +158,13 @@
+ 					hasContent = true
+ 				}
+ 			case "input_json_delta":
+-				// Tool use input delta - accumulate arguments for tool calls
++				// Tool use input delta - stream argument fragments incrementally
+ 				if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
+ 					index := int(root.Get("index").Int())
+-					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
+-						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
+-							accumulator.Arguments.WriteString(partialJSON.String())
+-						}
+-					}
++					template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.index", index)
++					template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.arguments", partialJSON.String())
++					return []string{template}
+ 				}
+-				// Don't output anything yet - wait for complete tool call
+ 				return []string{}
+ 			}
+ 		}
+@@ -173,26 +175,10 @@
+ 		}
+ 
+ 	case "content_block_stop":
+-		// End of content block - output complete tool call if it's a tool_use block
++		// End of content block - clean up tool call accumulator
+ 		index := int(root.Get("index").Int())
+ 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
+-			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
+-				// Build complete tool call with accumulated arguments
+-				arguments := accumulator.Arguments.String()
+-				if arguments == "" {
+-					arguments = "{}"
+-				}
+-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.index", index)
+-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.id", accumulator.ID)
+-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.type", "function")
+-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.name", accumulator.Name)
+-				template, _ = sjson.Set(template, "choices.0.delta.tool_calls.0.function.arguments", arguments)
+-
+-				// Clean up the accumulator for this index
+-				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator, index)
+-
+-				return []string{template}
+-			}
++			delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator, index)
+ 		}
+ 		return []string{}
+ 
