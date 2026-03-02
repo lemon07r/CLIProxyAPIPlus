@@ -1,0 +1,177 @@
+# PATCH 009: Copilot anti-fingerprinting and ban reduction
+#
+# Reduces account ban risk by making proxy traffic look like real VS Code usage:
+#
+# 1. Per-account header diversity: Deterministically selects User-Agent,
+#    Editor-Version, and Editor-Plugin-Version from realistic version pools
+#    based on a hash of the API token. Each account gets a consistent but
+#    unique fingerprint.
+#
+# 2. Persistent session metadata: VScode-MachineId is derived deterministically
+#    from the API token (stable forever, like a real hardware fingerprint).
+#    VScode-SessionId rotates every 4 hours (simulating editor restarts)
+#    instead of generating a new random UUID per request.
+#
+# 3. Mixed X-Initiator: Instead of always sending "agent" (which is the most
+#    obvious anomaly), 80% of requests use "agent" for unlimited premium access
+#    and 20% use the real dynamic value based on message content. This makes
+#    the account's usage pattern look like a normal VS Code user who happens
+#    to use agent mode frequently.
+#
+--- a/internal/runtime/executor/github_copilot_executor.go
++++ b/internal/runtime/executor/github_copilot_executor.go
+@@ -4,8 +4,11 @@
+ 	"bufio"
+ 	"bytes"
+ 	"context"
++	"crypto/sha256"
++	"encoding/hex"
+ 	"fmt"
+ 	"io"
++	"math/rand"
+ 	"net/http"
+ 	"strings"
+ 	"sync"
+@@ -43,8 +46,81 @@
+ 	copilotIntegrationID = "vscode-chat"
+ 	copilotOpenAIIntent  = "conversation-edits"
+ 	copilotGitHubAPIVer  = "2025-10-01"
++
++	// copilotAgentRatio is the fraction of requests that use X-Initiator "agent"
++	// for unlimited premium access. The remainder use the real dynamic value
++	// to blend in with normal VS Code traffic patterns.
++	copilotAgentRatio = 0.80
++
++	// copilotSessionRotation controls how often the synthetic VScode-SessionId
++	// rotates, simulating editor restarts.
++	copilotSessionRotation = 4 * time.Hour
++)
++
++// Per-account header fingerprint pools. Each account deterministically picks
++// one combination based on a hash of its API token, so the same account always
++// presents the same fingerprint within a version generation.
++var (
++	copilotEditorVersions = []string{
++		"vscode/1.107.0",
++		"vscode/1.107.1",
++		"vscode/1.108.0",
++		"vscode/1.108.2",
++		"vscode/1.109.0-20260124",
++		"vscode/1.109.1",
++	}
++	copilotPluginVersions = []string{
++		"copilot-chat/0.35.0",
++		"copilot-chat/0.35.1",
++		"copilot-chat/0.36.0",
++		"copilot-chat/0.36.2",
++		"copilot-chat/0.37.2026013101",
++		"copilot-chat/0.37.2026020301",
++	}
++	copilotUserAgents = []string{
++		"GithubCopilot/1.0",
++		"GitHubCopilotChat/0.35.0",
++		"GitHubCopilotChat/0.36.0",
++		"GitHubCopilotChat/0.37.0",
++	}
+ )
+ 
++// copilotTokenHash returns a deterministic SHA-256 hash for the given API token.
++func copilotTokenHash(apiToken string) [32]byte {
++	return sha256.Sum256([]byte(apiToken))
++}
++
++// copilotMachineID derives a stable, deterministic MachineId from the API token.
++// Real VS Code keeps the same MachineId forever (hardware fingerprint).
++func copilotMachineID(apiToken string) string {
++	h := copilotTokenHash(apiToken)
++	return hex.EncodeToString(h[:])
++}
++
++// copilotSessionID derives a deterministic SessionId that rotates every
++// copilotSessionRotation interval, simulating periodic editor restarts.
++func copilotSessionID(apiToken string) string {
++	bucket := time.Now().Unix() / int64(copilotSessionRotation.Seconds())
++	raw := fmt.Sprintf("%s:%d", apiToken, bucket)
++	h := sha256.Sum256([]byte(raw))
++	// Format as UUID-like string to match real VS Code session IDs
++	hex := hex.EncodeToString(h[:16])
++	return fmt.Sprintf("%s-%s-%s-%s-%s", hex[0:8], hex[8:12], hex[12:16], hex[16:20], hex[20:32])
++}
++
++// copilotPickIndex deterministically selects an index from a pool based on the token hash.
++func copilotPickIndex(apiToken string, salt string, poolSize int) int {
++	raw := fmt.Sprintf("%s:%s", apiToken, salt)
++	h := sha256.Sum256([]byte(raw))
++	return int(h[0])%poolSize + int(h[1])%poolSize*0
++}
++
++// copilotShouldUseAgent decides whether this request should use X-Initiator "agent"
++// based on the configured ratio. Uses a per-request random coin flip.
++func copilotShouldUseAgent() bool {
++	return rand.Float64() < copilotAgentRatio
++}
++
+ // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
+ type GitHubCopilotExecutor struct {
+ 	cfg   *config.Config
+@@ -520,22 +596,53 @@
+ }
+ 
+ // applyHeaders sets the required headers for GitHub Copilot API requests.
++// Uses per-account deterministic fingerprinting to avoid detection:
++// - MachineId is stable per token (simulates hardware fingerprint)
++// - SessionId rotates every few hours (simulates editor restarts)
++// - Editor/plugin versions are deterministic per account from a realistic pool
++// - X-Initiator mixes "agent" (for unlimited premium) with real dynamic values
+ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, format sdktranslator.Format, body []byte) {
+ 	r.Header.Set("Content-Type", "application/json")
+ 	r.Header.Set("Authorization", "Bearer "+apiToken)
+ 	r.Header.Set("Accept", "application/json")
+-	r.Header.Set("User-Agent", copilotUserAgent)
+-	r.Header.Set("Editor-Version", copilotEditorVersion)
+-	r.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
++
++	// Per-account header diversity: deterministically pick from version pools
++	uaIdx := copilotPickIndex(apiToken, "ua", len(copilotUserAgents))
++	edIdx := copilotPickIndex(apiToken, "editor", len(copilotEditorVersions))
++	plIdx := copilotPickIndex(apiToken, "plugin", len(copilotPluginVersions))
++	r.Header.Set("User-Agent", copilotUserAgents[uaIdx])
++	r.Header.Set("Editor-Version", copilotEditorVersions[edIdx])
++	r.Header.Set("Editor-Plugin-Version", copilotPluginVersions[plIdx])
++
+ 	r.Header.Set("Openai-Intent", copilotOpenAIIntent)
+ 	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
+ 	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
+ 	r.Header.Set("X-Request-Id", uuid.NewString())
+ 
+-	// Always set X-Initiator to "agent" for unlimited premium request access.
+-	r.Header.Set("X-Initiator", "agent")
+-	r.Header.Set("VScode-SessionId", uuid.NewString())
+-	r.Header.Set("VScode-MachineId", uuid.NewString())
++	// Mix agent/user initiator to blend with normal VS Code traffic.
++	// Most requests use "agent" for unlimited premium access; a fraction
++	// use the real dynamic value to look like normal usage.
++	if copilotShouldUseAgent() {
++		r.Header.Set("X-Initiator", "agent")
++	} else {
++		initiator := "user"
++		if len(body) > 0 {
++			if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
++				for _, msg := range messages.Array() {
++					role := msg.Get("role").String()
++					if role == "assistant" || role == "tool" {
++						initiator = "agent"
++						break
++					}
++				}
++			}
++		}
++		r.Header.Set("X-Initiator", initiator)
++	}
++
++	// Persistent per-account session metadata
++	r.Header.Set("VScode-SessionId", copilotSessionID(apiToken))
++	r.Header.Set("VScode-MachineId", copilotMachineID(apiToken))
+ 	if isCopilotClaudeFormat(format) {
+ 		r.Header.Set("anthropic-beta", copilotThinkingBeta)
+ 	}

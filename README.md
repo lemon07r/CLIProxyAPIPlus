@@ -40,6 +40,18 @@ Comprehensive anti-fingerprinting for the Antigravity executor — goes well bey
 ### 007 - Copilot Responses Vision Detection
 Extends `detectVisionContent` in the GitHub Copilot executor to support the Responses API input format. The original function only checked the `messages` array (Chat Completions format) for image content, so clients like opencode's `@ai-sdk/openai` that send Responses API format with `input` array containing `input_image` blocks never triggered the `Copilot-Vision-Request: true` header — causing models like GPT-5.3 codex to reject image inputs. This patch adds detection for `input_image`, `image_url`, and `image` content types in the `input` array alongside the existing `messages` check.
 
+### 008 - Streaming Tool Call Deltas
+Fixes incremental streaming of tool call arguments in the Claude-to-OpenAI response translator. Without this patch, tool call `arguments` are buffered and sent as a single large chunk at the end of the stream, which causes clients expecting incremental deltas (like opencode) to stall or timeout on long tool calls. This patch streams `input_json_delta` events as they arrive, emitting each JSON fragment as a separate `tool_calls.function.arguments` delta — matching the behavior of native OpenAI streaming.
+
+### 009 - Copilot Anti-Fingerprinting
+Reduces ban risk for GitHub Copilot accounts by making proxy traffic resemble real VS Code usage patterns instead of obvious proxy signatures.
+
+**Per-Account Header Diversity:** Each auth token gets a deterministic, unique set of headers — `User-Agent`, `Editor-Version`, and `Editor-Plugin-Version` are selected from pools of realistic recent versions using a hash of the token. Different accounts appear as different VS Code installations on different platforms (`win32/x64`, `darwin/arm64`, `linux/x64`).
+
+**Persistent Session & Machine IDs:** Instead of generating random UUIDs on every request (a massive red flag), `VScode-MachineId` is derived deterministically from the auth token (stable forever, like a real hardware fingerprint) and `VScode-SessionId` rotates every 4 hours (simulating editor restarts). This matches real VS Code behavior where MachineId never changes and SessionId persists for hours.
+
+**Mixed X-Initiator Ratio:** Instead of forcing `X-Initiator: "agent"` on 100% of requests (statistically anomalous), uses an 80/20 split — 80% of requests use `"agent"` for unlimited premium access, while 20% use the real dynamic value based on message content. This makes the account's usage pattern blend in with normal VS Code users who naturally produce a mix of both initiator types.
+
 ---
 
 ## Example Configs
