@@ -17,9 +17,9 @@
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-@@ -154,35 +154,51 @@
- 		return true
- 	})
+@@ -97,35 +97,51 @@
+ 		}
+ 	}
  
 -	// Gemini-specific handling for non-Claude models:
 -	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.

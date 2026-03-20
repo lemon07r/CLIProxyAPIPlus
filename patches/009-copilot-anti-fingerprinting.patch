@@ -18,8 +18,8 @@
 #    the account's usage pattern look like a normal VS Code user who happens
 #    to use agent mode frequently.
 #
---- a/internal/runtime/executor/github_copilot_executor.go
-+++ b/internal/runtime/executor/github_copilot_executor.go
+--- a/internal/runtime/executor/github_copilot_executor.go	2026-03-20 04:38:12.671610149 +0000
++++ b/internal/runtime/executor/github_copilot_executor.go	2026-03-20 04:39:19.647878275 +0000
 @@ -4,8 +4,11 @@
  	"bufio"
  	"bytes"
@@ -32,7 +32,7 @@
  	"net/http"
  	"strings"
  	"sync"
-@@ -43,8 +46,81 @@
+@@ -44,8 +47,71 @@
  	copilotIntegrationID = "vscode-chat"
  	copilotOpenAIIntent  = "conversation-edits"
  	copilotGitHubAPIVer  = "2025-10-01"
@@ -104,7 +104,7 @@
  // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
  type GitHubCopilotExecutor struct {
  	cfg   *config.Config
-@@ -520,22 +596,53 @@
+@@ -516,22 +582,47 @@
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
@@ -146,14 +146,8 @@
 +	} else {
 +		initiator := "user"
 +		if len(body) > 0 {
-+			if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-+				for _, msg := range messages.Array() {
-+					role := msg.Get("role").String()
-+					if role == "assistant" || role == "tool" {
-+						initiator = "agent"
-+						break
-+					}
-+				}
++			if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
++				initiator = "agent"
 +			}
 +		}
 +		r.Header.Set("X-Initiator", initiator)

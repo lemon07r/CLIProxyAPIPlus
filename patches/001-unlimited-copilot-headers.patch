@@ -6,8 +6,9 @@
 # - API version updated to 2025-10-01
 # - Forces X-Initiator to "agent" (bypasses dynamic logic)
 # - Adds random VScode-SessionId and VScode-MachineId
---- a/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:40:39.585967273 +0000
-+++ b/internal/runtime/executor/github_copilot_executor.go	2026-02-20 09:40:39.589967289 +0000
+diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+--- a/internal/runtime/executor/github_copilot_executor.go
++++ b/internal/runtime/executor/github_copilot_executor.go
 @@ -35,12 +35,14 @@
  	maxScannerBufferSize = 20_971_520
  
@@ -28,21 +29,13 @@
  )
  
  // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
-@@ -489,19 +491,10 @@
+@@ -489,11 +491,10 @@
  	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
  	r.Header.Set("X-Request-Id", uuid.NewString())
  
 -	initiator := "user"
--	if len(body) > 0 {
--		if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
--			for _, msg := range messages.Array() {
--				role := msg.Get("role").String()
--				if role == "assistant" || role == "tool" {
--					initiator = "agent"
--					break
--				}
--			}
--		}
+-	if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
+-		initiator = "agent"
 -	}
 -	r.Header.Set("X-Initiator", initiator)
 +	// Always set X-Initiator to "agent" for unlimited premium request access.
@@ -51,4 +44,4 @@
 +	r.Header.Set("VScode-MachineId", uuid.NewString())
  }
  
- // detectVisionContent checks if the request body contains vision/image content.
+ func detectLastConversationRole(body []byte) string {

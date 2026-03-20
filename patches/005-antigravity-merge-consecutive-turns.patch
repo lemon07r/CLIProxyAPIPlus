@@ -4,9 +4,10 @@
 # This patch merges consecutive user or model turns into a single turn by
 # combining their parts arrays, which is required when tool results and user
 # messages end up adjacent after translation.
---- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go	2026-02-20 18:28:09.307328667 +0000
-+++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go	2026-02-20 18:28:09.307328667 +0000
-@@ -87,6 +87,33 @@
+diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+@@ -79,6 +79,33 @@
  		})
  	}
  

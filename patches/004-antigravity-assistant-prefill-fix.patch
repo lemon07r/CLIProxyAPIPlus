@@ -15,7 +15,7 @@
 diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
 --- a/internal/translator/antigravity/claude/antigravity_claude_request.go
 +++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
-@@ -308,6 +308,61 @@
+@@ -382,6 +382,61 @@
  		}
  	}
  
@@ -80,7 +80,7 @@ diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.g
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-@@ -87,6 +87,56 @@
+@@ -79,6 +79,56 @@
  		})
  	}
  
