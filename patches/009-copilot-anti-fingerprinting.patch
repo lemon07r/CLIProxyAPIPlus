@@ -1,4 +1,4 @@
-# PATCH 009: Copilot anti-fingerprinting and conversation-warm initiator mix
+# PATCH 009: Copilot anti-fingerprinting and persistent conversation-warm initiator mix
 #
 # Reduces account ban risk by making proxy traffic look like real VS Code usage:
 #
@@ -17,21 +17,31 @@
 #    "agent", warmed conversations flip back to "agent", and 2% of warmed
 #    follow-ups still use the real initiator for extra noise.
 #
+# 4. Persistent warm conversation cache: Stores hashed warm-root expiry state
+#    under the auth dir so watchtower/deploy restarts do not reset every active
+#    conversation back to a billed cold start.
+#
 diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
-index 7335439..6086e98 100644
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -4,6 +4,9 @@ import (
+@@ -4,9 +4,16 @@
  	"bufio"
  	"bytes"
  	"context"
 +	"crypto/sha256"
 +	"encoding/binary"
 +	"encoding/hex"
++	"encoding/json"
++	"errors"
  	"fmt"
  	"io"
  	"net/http"
-@@ -46,13 +49,172 @@ const (
++	"os"
++	"path/filepath"
+ 	"slices"
+ 	"strings"
+ 	"sync"
+@@ -46,13 +53,179 @@
  	copilotIntegrationID = "vscode-chat"
  	copilotOpenAIIntent  = "conversation-edits"
  	copilotGitHubAPIVer  = "2025-10-01"
@@ -52,8 +62,13 @@ index 7335439..6086e98 100644
 +	// copilotWarmConversationCleanupInterval controls how often expired warm
 +	// conversation entries are purged.
 +	copilotWarmConversationCleanupInterval = 15 * time.Minute
- )
- 
++
++	// copilotWarmConversationStateFilename stores warm conversation expiry state
++	// in the persistent auth dir so deploys and watchtower restarts do not reset
++	// every active conversation back to a billed cold start.
++	copilotWarmConversationStateFilename = "copilot-warm-conversations.json"
++)
++
 +// Per-account header fingerprint pools. Each account deterministically picks
 +// one combination based on a hash of its API token, so the same account always
 +// presents the same fingerprint within a version generation.
@@ -70,8 +85,8 @@ index 7335439..6086e98 100644
 +		"GithubCopilot/1.0",
 +		"GitHubCopilotChat/0.37.0",
 +	}
-+)
-+
+ )
+ 
 +// copilotTokenHash returns a deterministic SHA-256 hash for the given API token.
 +func copilotTokenHash(apiToken string) [32]byte {
 +	return sha256.Sum256([]byte(apiToken))
@@ -203,19 +218,119 @@ index 7335439..6086e98 100644
 +	cache             map[string]*cachedAPIToken
 +	warmMu            sync.RWMutex
 +	warmCleanupOnce   sync.Once
++	warmPersistMu     sync.Mutex
++	warmStatePath     string
 +	warmConversations map[string]time.Time
  }
  
  // cachedAPIToken stores a cached Copilot API token with its expiry.
-@@ -65,9 +227,93 @@ type cachedAPIToken struct {
+@@ -64,10 +237,214 @@
+ 
  // NewGitHubCopilotExecutor constructs a new executor instance.
  func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
- 	return &GitHubCopilotExecutor{
+-	return &GitHubCopilotExecutor{
 -		cfg:   cfg,
 -		cache: make(map[string]*cachedAPIToken),
++	e := &GitHubCopilotExecutor{
 +		cfg:               cfg,
 +		cache:             make(map[string]*cachedAPIToken),
++		warmStatePath:     copilotWarmConversationStatePath(cfg),
 +		warmConversations: make(map[string]time.Time),
++	}
++	e.loadCopilotWarmConversations()
++	return e
++}
++
++func copilotWarmConversationStatePath(cfg *config.Config) string {
++	if cfg == nil {
++		return ""
++	}
++	dir := strings.TrimSpace(cfg.AuthDir)
++	if dir == "" {
++		return ""
+ 	}
++	return filepath.Join(dir, copilotWarmConversationStateFilename)
++}
++
++func (e *GitHubCopilotExecutor) loadCopilotWarmConversations() {
++	if e.warmStatePath == "" {
++		return
++	}
++
++	data, err := os.ReadFile(e.warmStatePath)
++	if err != nil {
++		if !errors.Is(err, os.ErrNotExist) {
++			log.Debugf("github-copilot executor: warm conversation cache read error: %v", err)
++		}
++		return
++	}
++
++	raw := make(map[string]int64)
++	if err := json.Unmarshal(data, &raw); err != nil {
++		log.Warnf("github-copilot executor: warm conversation cache decode error: %v", err)
++		return
++	}
++
++	now := time.Now()
++	e.warmMu.Lock()
++	for key, unixExpiry := range raw {
++		expiresAt := time.Unix(unixExpiry, 0)
++		if expiresAt.After(now) {
++			e.warmConversations[key] = expiresAt
++		}
++	}
++	e.warmMu.Unlock()
++}
++
++func (e *GitHubCopilotExecutor) snapshotCopilotWarmConversationsLocked(now time.Time) map[string]time.Time {
++	snapshot := make(map[string]time.Time, len(e.warmConversations))
++	for key, expiresAt := range e.warmConversations {
++		if expiresAt.After(now) {
++			snapshot[key] = expiresAt
++		}
++	}
++	return snapshot
++}
++
++func (e *GitHubCopilotExecutor) persistCopilotWarmConversations(snapshot map[string]time.Time) {
++	if e.warmStatePath == "" {
++		return
++	}
++
++	e.warmPersistMu.Lock()
++	defer e.warmPersistMu.Unlock()
++
++	if len(snapshot) == 0 {
++		if err := os.Remove(e.warmStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
++			log.Debugf("github-copilot executor: warm conversation cache cleanup error: %v", err)
++		}
++		return
++	}
++
++	if err := os.MkdirAll(filepath.Dir(e.warmStatePath), 0o700); err != nil {
++		log.Warnf("github-copilot executor: warm conversation cache mkdir error: %v", err)
++		return
++	}
++
++	payload := make(map[string]int64, len(snapshot))
++	for key, expiresAt := range snapshot {
++		payload[key] = expiresAt.Unix()
++	}
++
++	data, err := json.Marshal(payload)
++	if err != nil {
++		log.Warnf("github-copilot executor: warm conversation cache encode error: %v", err)
++		return
++	}
++
++	tmpPath := e.warmStatePath + ".tmp"
++	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
++		log.Warnf("github-copilot executor: warm conversation cache write error: %v", err)
++		return
++	}
++	if err := os.Rename(tmpPath, e.warmStatePath); err != nil {
++		_ = os.Remove(tmpPath)
++		log.Warnf("github-copilot executor: warm conversation cache rename error: %v", err)
 +	}
 +}
 +
@@ -234,14 +349,21 @@ index 7335439..6086e98 100644
 +
 +func (e *GitHubCopilotExecutor) purgeExpiredCopilotWarmConversations() {
 +	now := time.Now()
-+
++	dirty := false
++	var snapshot map[string]time.Time
 +	e.warmMu.Lock()
-+	defer e.warmMu.Unlock()
-+
 +	for key, expiresAt := range e.warmConversations {
 +		if !expiresAt.After(now) {
 +			delete(e.warmConversations, key)
++			dirty = true
 +		}
++	}
++	if dirty {
++		snapshot = e.snapshotCopilotWarmConversationsLocked(now)
++	}
++	e.warmMu.Unlock()
++	if dirty {
++		e.persistCopilotWarmConversations(snapshot)
 +	}
 +}
 +
@@ -263,11 +385,18 @@ index 7335439..6086e98 100644
 +		return true
 +	}
 +
++	var snapshot map[string]time.Time
++	dirty := false
 +	e.warmMu.Lock()
 +	if latest, ok := e.warmConversations[key]; ok && !latest.After(now) {
 +		delete(e.warmConversations, key)
++		snapshot = e.snapshotCopilotWarmConversationsLocked(now)
++		dirty = true
 +	}
 +	e.warmMu.Unlock()
++	if dirty {
++		e.persistCopilotWarmConversations(snapshot)
++	}
 +	return false
 +}
 +
@@ -275,12 +404,22 @@ index 7335439..6086e98 100644
 +	key := copilotWarmConversationKey(apiToken, body)
 +	if key == "" {
 +		return
- 	}
++	}
 +
 +	e.ensureCopilotWarmConversationCleanup()
++	now := time.Now()
++	newExpiry := now.Add(copilotWarmConversationTTL)
++	refreshThreshold := now.Add(copilotWarmConversationTTL / 2)
++	var snapshot map[string]time.Time
 +	e.warmMu.Lock()
-+	e.warmConversations[key] = time.Now().Add(copilotWarmConversationTTL)
++	if expiresAt, ok := e.warmConversations[key]; ok && expiresAt.After(refreshThreshold) {
++		e.warmMu.Unlock()
++		return
++	}
++	e.warmConversations[key] = newExpiry
++	snapshot = e.snapshotCopilotWarmConversationsLocked(now)
 +	e.warmMu.Unlock()
++	e.persistCopilotWarmConversations(snapshot)
 +}
 +
 +func (e *GitHubCopilotExecutor) shouldUseCopilotAgentInitiator(apiToken string, requestID string, body []byte) bool {
@@ -303,7 +442,7 @@ index 7335439..6086e98 100644
  }
  
  // Identifier implements ProviderExecutor.
-@@ -224,6 +470,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
+@@ -224,6 +601,7 @@
  		return resp, err
  	}
  	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -311,7 +450,7 @@ index 7335439..6086e98 100644
  
  	// Stabilize encrypted IDs in non-streaming Responses API output.
  	if isGPT5Model(req.Model) {
-@@ -365,6 +612,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
+@@ -365,6 +743,8 @@
  		return nil, err
  	}
  
@@ -320,7 +459,7 @@ index 7335439..6086e98 100644
  	out := make(chan cliproxyexecutor.StreamChunk)
  
  	go func() {
-@@ -555,20 +804,45 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
+@@ -555,20 +935,45 @@
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
@@ -374,10 +513,9 @@ index 7335439..6086e98 100644
  		r.Header.Set("anthropic-beta", copilotThinkingBeta)
  	}
 diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/internal/runtime/executor/github_copilot_executor_test.go
-index 62115ad..0a65cf4 100644
 --- a/internal/runtime/executor/github_copilot_executor_test.go
 +++ b/internal/runtime/executor/github_copilot_executor_test.go
-@@ -2,9 +2,11 @@ package executor
+@@ -2,11 +2,14 @@
  
  import (
  	"context"
@@ -388,8 +526,11 @@ index 62115ad..0a65cf4 100644
 +	"time"
  
  	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-@@ -278,14 +280,28 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+ 	"github.com/tidwall/gjson"
+@@ -278,14 +281,28 @@
  
  // --- Tests for X-Initiator detection logic (Problem L) ---
  
@@ -420,7 +561,7 @@ index 62115ad..0a65cf4 100644
  	}
  }
  
-@@ -293,11 +309,12 @@ func TestApplyHeaders_XInitiator_AgentWhenLastUserButHistoryHasAssistant(t *test
+@@ -293,11 +310,12 @@
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
@@ -436,7 +577,7 @@ index 62115ad..0a65cf4 100644
  	}
  }
  
-@@ -352,11 +369,11 @@ func TestApplyHeaders_XInitiator_UserInMultiTurnNoTools(t *testing.T) {
+@@ -352,11 +370,11 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// Genuine multi-turn: user → assistant (plain text) → user follow-up.
@@ -451,7 +592,7 @@ index 62115ad..0a65cf4 100644
  	}
  }
  
-@@ -365,11 +382,62 @@ func TestApplyHeaders_XInitiator_UserFollowUpAfterToolHistory(t *testing.T) {
+@@ -365,11 +383,80 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// User follow-up after a completed tool-use conversation.
@@ -491,6 +632,24 @@ index 62115ad..0a65cf4 100644
 +	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, followUpBody)
 +	if got := req.Header.Get("X-Initiator"); got != "user" {
 +		t.Fatalf("X-Initiator = %q, want user for warm-conversation noise", got)
++	}
++}
++
++func TestApplyHeaders_XInitiator_WarmConversationPersistsAcrossExecutorRestart(t *testing.T) {
++	t.Parallel()
++	cfg := &config.Config{AuthDir: t.TempDir()}
++	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
++
++	e1 := NewGitHubCopilotExecutor(cfg)
++	e1.markCopilotWarmConversation("token", rootBody)
++
++	e2 := NewGitHubCopilotExecutor(cfg)
++	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, false))
++	e2.applyHeaders(req, "token", sdktranslator.FormatOpenAI, followUpBody)
++	if got := req.Header.Get("X-Initiator"); got != "agent" {
++		t.Fatalf("X-Initiator = %q, want agent for warmed conversation restored from disk", got)
 +	}
 +}
 +
