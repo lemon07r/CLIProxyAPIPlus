@@ -1,4 +1,4 @@
-# PATCH 009: Copilot anti-fingerprinting and ban reduction
+# PATCH 009: Copilot anti-fingerprinting and conversation-warm initiator mix
 #
 # Reduces account ban risk by making proxy traffic look like real VS Code usage:
 #
@@ -12,41 +12,48 @@
 #    VScode-SessionId rotates every 4 hours (simulating editor restarts)
 #    instead of generating a new random UUID per request.
 #
-# 3. Mixed X-Initiator: Instead of always sending "agent" (which is the most
-#    obvious anomaly), 95% of requests use "agent" for unlimited premium access
-#    and 5% use the real dynamic value based on message content. This keeps
-#    premium usage alive occasionally without burning through the quota as fast.
+# 3. Conversation-aware X-Initiator: First-seen conversation roots bill as
+#    "user", explicit tool loops and previous_response_id continuations stay
+#    "agent", warmed conversations flip back to "agent", and 1% of warmed
+#    follow-ups still use the real initiator for extra noise.
 #
 diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+index 7335439..6086e98 100644
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -4,8 +4,11 @@
+@@ -4,6 +4,9 @@ import (
  	"bufio"
  	"bytes"
  	"context"
 +	"crypto/sha256"
++	"encoding/binary"
 +	"encoding/hex"
  	"fmt"
  	"io"
-+	"math/rand"
  	"net/http"
- 	"slices"
- 	"strings"
-@@ -46,8 +49,87 @@
+@@ -46,13 +49,172 @@ const (
  	copilotIntegrationID = "vscode-chat"
  	copilotOpenAIIntent  = "conversation-edits"
  	copilotGitHubAPIVer  = "2025-10-01"
 +
-+	// copilotAgentRatio is the fraction of requests that use X-Initiator "agent"
-+	// for unlimited premium access. The remainder use the real dynamic value
-+	// to blend in with normal VS Code traffic patterns.
-+	copilotAgentRatio = 0.95
++	// copilotWarmConversationRealRatio is the small fraction of warmed
++	// conversations that still use the real X-Initiator value for extra noise.
++	copilotWarmConversationRealRatio = 0.01
 +
 +	// copilotSessionRotation controls how often the synthetic VScode-SessionId
 +	// rotates, simulating editor restarts.
 +	copilotSessionRotation = 4 * time.Hour
-+)
 +
++	// copilotWarmConversationTTL controls how long a conversation root stays warm.
++	// First-seen roots bill as "user"; later turns for the same root flip to
++	// "agent" until the warm entry expires.
++	copilotWarmConversationTTL = 12 * time.Hour
++
++	// copilotWarmConversationCleanupInterval controls how often expired warm
++	// conversation entries are purged.
++	copilotWarmConversationCleanupInterval = 15 * time.Minute
+ )
+ 
 +// Per-account header fingerprint pools. Each account deterministically picks
 +// one combination based on a hash of its API token, so the same account always
 +// presents the same fingerprint within a version generation.
@@ -63,8 +70,8 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		"GithubCopilot/1.0",
 +		"GitHubCopilotChat/0.37.0",
 +	}
- )
- 
++)
++
 +// copilotTokenHash returns a deterministic SHA-256 hash for the given API token.
 +func copilotTokenHash(apiToken string) [32]byte {
 +	return sha256.Sum256([]byte(apiToken))
@@ -92,43 +99,237 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +func copilotPickIndex(apiToken string, salt string, poolSize int) int {
 +	raw := fmt.Sprintf("%s:%s", apiToken, salt)
 +	h := sha256.Sum256([]byte(raw))
-+	return int(h[0])%poolSize + int(h[1])%poolSize*0
++	return int(binary.BigEndian.Uint16(h[:2]) % uint16(poolSize))
 +}
 +
-+// copilotShouldUseAgent decides whether this request should use X-Initiator "agent"
-+// based on the configured ratio. Uses a per-request random coin flip.
-+func copilotShouldUseAgent() bool {
-+	return rand.Float64() < copilotAgentRatio
++func copilotHashUnitInterval(apiToken string, requestID string, salt string) float64 {
++	raw := fmt.Sprintf("%s:%s:%s", apiToken, requestID, salt)
++	h := sha256.Sum256([]byte(raw))
++	n := binary.BigEndian.Uint64(h[:8])
++	return float64(n>>11) / (1 << 53)
 +}
 +
-+// detectLastConversationRole returns the role of the last message in the conversation.
-+func detectLastConversationRole(body []byte) string {
++func copilotShouldUseWarmConversationRealInitiator(apiToken string, requestID string) bool {
++	return copilotHashUnitInterval(apiToken, requestID, "warm-real-initiator") < copilotWarmConversationRealRatio
++}
++
++func copilotConversationHasPreviousResponseID(body []byte) bool {
++	if len(body) == 0 {
++		return false
++	}
++	return gjson.GetBytes(body, "previous_response_id").String() != ""
++}
++
++func isCopilotWarmConversationRootRole(role string) bool {
++	switch strings.TrimSpace(role) {
++	case "user", "system", "developer":
++		return true
++	default:
++		return false
++	}
++}
++
++func copilotWarmConversationKey(apiToken string, body []byte) string {
 +	if len(body) == 0 {
 +		return ""
 +	}
++
++	var root strings.Builder
++	appendRootPart := func(label string, part gjson.Result) {
++		if !part.Exists() {
++			return
++		}
++		root.WriteString(label)
++		root.WriteByte(':')
++		root.WriteString(part.Raw)
++		root.WriteByte('\n')
++	}
++
++	if instructions := gjson.GetBytes(body, "instructions"); instructions.Exists() {
++		appendRootPart("instructions", instructions)
++	}
++	if system := gjson.GetBytes(body, "system"); system.Exists() {
++		appendRootPart("system", system)
++	}
++
 +	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
-+		arr := messages.Array()
-+		for i := len(arr) - 1; i >= 0; i-- {
-+			if r := arr[i].Get("role").String(); r != "" {
-+				return r
++		for _, msg := range messages.Array() {
++			role := msg.Get("role").String()
++			if role == "" {
++				continue
++			}
++			if !isCopilotWarmConversationRootRole(role) {
++				break
++			}
++			appendRootPart("message", msg)
++		}
++	}
++
++	if root.Len() == 0 {
++		if input := gjson.GetBytes(body, "input"); input.Exists() {
++			if input.IsArray() {
++				for _, item := range input.Array() {
++					itemType := item.Get("type").String()
++					role := item.Get("role").String()
++					if itemType == "" && role != "" {
++						itemType = "message"
++					}
++					if itemType != "message" || !isCopilotWarmConversationRootRole(role) {
++						break
++					}
++					appendRootPart("input", item)
++				}
++			} else if input.Type == gjson.String {
++				appendRootPart("input", input)
 +			}
 +		}
 +	}
-+	return ""
++
++	if root.Len() == 0 {
++		return ""
++	}
++
++	sum := sha256.Sum256([]byte(apiToken + "\n" + root.String()))
++	return "copilot-conversation:" + hex.EncodeToString(sum[:])
 +}
 +
  // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
  type GitHubCopilotExecutor struct {
- 	cfg   *config.Config
-@@ -555,20 +637,47 @@
+-	cfg   *config.Config
+-	mu    sync.RWMutex
+-	cache map[string]*cachedAPIToken
++	cfg               *config.Config
++	mu                sync.RWMutex
++	cache             map[string]*cachedAPIToken
++	warmMu            sync.RWMutex
++	warmCleanupOnce   sync.Once
++	warmConversations map[string]time.Time
+ }
+ 
+ // cachedAPIToken stores a cached Copilot API token with its expiry.
+@@ -65,9 +227,93 @@ type cachedAPIToken struct {
+ // NewGitHubCopilotExecutor constructs a new executor instance.
+ func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
+ 	return &GitHubCopilotExecutor{
+-		cfg:   cfg,
+-		cache: make(map[string]*cachedAPIToken),
++		cfg:               cfg,
++		cache:             make(map[string]*cachedAPIToken),
++		warmConversations: make(map[string]time.Time),
++	}
++}
++
++func (e *GitHubCopilotExecutor) ensureCopilotWarmConversationCleanup() {
++	e.warmCleanupOnce.Do(func() {
++		go func() {
++			ticker := time.NewTicker(copilotWarmConversationCleanupInterval)
++			defer ticker.Stop()
++
++			for range ticker.C {
++				e.purgeExpiredCopilotWarmConversations()
++			}
++		}()
++	})
++}
++
++func (e *GitHubCopilotExecutor) purgeExpiredCopilotWarmConversations() {
++	now := time.Now()
++
++	e.warmMu.Lock()
++	defer e.warmMu.Unlock()
++
++	for key, expiresAt := range e.warmConversations {
++		if !expiresAt.After(now) {
++			delete(e.warmConversations, key)
++		}
++	}
++}
++
++func (e *GitHubCopilotExecutor) isCopilotWarmConversation(key string) bool {
++	if key == "" {
++		return false
++	}
++
++	e.ensureCopilotWarmConversationCleanup()
++
++	now := time.Now()
++	e.warmMu.RLock()
++	expiresAt, ok := e.warmConversations[key]
++	e.warmMu.RUnlock()
++	if !ok {
++		return false
++	}
++	if expiresAt.After(now) {
++		return true
++	}
++
++	e.warmMu.Lock()
++	if latest, ok := e.warmConversations[key]; ok && !latest.After(now) {
++		delete(e.warmConversations, key)
++	}
++	e.warmMu.Unlock()
++	return false
++}
++
++func (e *GitHubCopilotExecutor) markCopilotWarmConversation(apiToken string, body []byte) {
++	key := copilotWarmConversationKey(apiToken, body)
++	if key == "" {
++		return
+ 	}
++
++	e.ensureCopilotWarmConversationCleanup()
++	e.warmMu.Lock()
++	e.warmConversations[key] = time.Now().Add(copilotWarmConversationTTL)
++	e.warmMu.Unlock()
++}
++
++func (e *GitHubCopilotExecutor) shouldUseCopilotAgentInitiator(apiToken string, requestID string, body []byte) bool {
++	if len(body) == 0 {
++		return true
++	}
++	if isAgentInitiated(body) {
++		return true
++	}
++	if copilotConversationHasPreviousResponseID(body) {
++		return true
++	}
++
++	warmKey := copilotWarmConversationKey(apiToken, body)
++	if !e.isCopilotWarmConversation(warmKey) {
++		return false
++	}
++
++	return !copilotShouldUseWarmConversationRealInitiator(apiToken, requestID)
+ }
+ 
+ // Identifier implements ProviderExecutor.
+@@ -224,6 +470,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
+ 		return resp, err
+ 	}
+ 	appendAPIResponseChunk(ctx, e.cfg, data)
++	e.markCopilotWarmConversation(apiToken, body)
+ 
+ 	// Stabilize encrypted IDs in non-streaming Responses API output.
+ 	if isGPT5Model(req.Model) {
+@@ -365,6 +612,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
+ 		return nil, err
+ 	}
+ 
++	e.markCopilotWarmConversation(apiToken, body)
++
+ 	out := make(chan cliproxyexecutor.StreamChunk)
+ 
+ 	go func() {
+@@ -555,20 +804,45 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
 +// Uses per-account deterministic fingerprinting to avoid detection:
-+// - MachineId is stable per token (simulates hardware fingerprint)
-+// - SessionId rotates every few hours (simulates editor restarts)
-+// - Editor/plugin versions are deterministic per account from a realistic pool
-+// - X-Initiator mixes "agent" (for unlimited premium) with real dynamic values
++//   - MachineId is stable per token (simulates hardware fingerprint)
++//   - SessionId rotates every few hours (simulates editor restarts)
++//   - Editor/plugin versions are deterministic per account from a realistic pool
++//   - X-Initiator bills first-seen roots, keeps continuations/tool loops on agent,
++//     and leaks a tiny amount of real traffic for noise on warmed conversations
  func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, format sdktranslator.Format, body []byte) {
  	r.Header.Set("Content-Type", "application/json")
  	r.Header.Set("Authorization", "Bearer "+apiToken)
@@ -148,24 +349,22 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	r.Header.Set("Openai-Intent", copilotOpenAIIntent)
  	r.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
  	r.Header.Set("X-Github-Api-Version", copilotGitHubAPIVer)
- 	r.Header.Set("X-Request-Id", uuid.NewString())
+-	r.Header.Set("X-Request-Id", uuid.NewString())
 -	r.Header.Set("X-Initiator", "agent")
 -	r.Header.Set("VScode-SessionId", uuid.NewString())
 -	r.Header.Set("VScode-MachineId", uuid.NewString())
++	requestID := r.Header.Get("X-Request-Id")
++	if requestID == "" {
++		requestID = uuid.NewString()
++	}
++	r.Header.Set("X-Request-Id", requestID)
 +
-+	// Mix agent/user initiator to blend with normal VS Code traffic.
-+	// Most requests use "agent" for unlimited premium access; a fraction
-+	// use the real dynamic value to look like normal usage.
-+	if copilotShouldUseAgent() {
++	// First-seen conversation roots bill as user; warmed roots flip to agent.
++	// Explicit tool loops and previous_response_id continuations stay agent.
++	if e.shouldUseCopilotAgentInitiator(apiToken, requestID, body) {
 +		r.Header.Set("X-Initiator", "agent")
 +	} else {
-+		initiator := "user"
-+		if len(body) > 0 {
-+			if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
-+				initiator = "agent"
-+			}
-+		}
-+		r.Header.Set("X-Initiator", initiator)
++		r.Header.Set("X-Initiator", "user")
 +	}
 +
 +	// Persistent per-account session metadata
@@ -174,3 +373,146 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	if isCopilotClaudeFormat(format) {
  		r.Header.Set("anthropic-beta", copilotThinkingBeta)
  	}
+diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/internal/runtime/executor/github_copilot_executor_test.go
+index 62115ad..0a65cf4 100644
+--- a/internal/runtime/executor/github_copilot_executor_test.go
++++ b/internal/runtime/executor/github_copilot_executor_test.go
+@@ -2,9 +2,11 @@ package executor
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"net/http"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+@@ -278,14 +280,28 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
+ 
+ // --- Tests for X-Initiator detection logic (Problem L) ---
+ 
++func findCopilotWarmConversationRequestID(t *testing.T, wantReal bool) string {
++	t.Helper()
++
++	for i := 0; i < 10000; i++ {
++		requestID := fmt.Sprintf("req-%d", i)
++		if copilotShouldUseWarmConversationRealInitiator("token", requestID) == wantReal {
++			return requestID
++		}
++	}
++
++	t.Fatalf("could not find request ID with wantReal=%v", wantReal)
++	return ""
++}
++
+ func TestApplyHeaders_XInitiator_UserOnly(t *testing.T) {
+ 	t.Parallel()
+ 	e := &GitHubCopilotExecutor{}
+ 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+ 	body := []byte(`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello"}]}`)
+ 	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, body)
+-	if got := req.Header.Get("X-Initiator"); got != "agent" {
+-		t.Fatalf("X-Initiator = %q, want agent", got)
++	if got := req.Header.Get("X-Initiator"); got != "user" {
++		t.Fatalf("X-Initiator = %q, want user", got)
+ 	}
+ }
+ 
+@@ -293,11 +309,12 @@ func TestApplyHeaders_XInitiator_AgentWhenLastUserButHistoryHasAssistant(t *test
+ 	t.Parallel()
+ 	e := &GitHubCopilotExecutor{}
+ 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+-	// Claude Code typical flow: last message is user (tool result), but has assistant in history
+-	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":"tool result here"}]}`)
++	// Claude Code typical flow: the last message is user-role, but it contains
++	// a tool_result block and is therefore still agent-initiated.
++	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"file contents"}]}]}`)
+ 	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, body)
+ 	if got := req.Header.Get("X-Initiator"); got != "agent" {
+-		t.Fatalf("X-Initiator = %q, want agent (assistant exists in messages)", got)
++		t.Fatalf("X-Initiator = %q, want agent (last user contains tool_result)", got)
+ 	}
+ }
+ 
+@@ -352,11 +369,11 @@ func TestApplyHeaders_XInitiator_UserInMultiTurnNoTools(t *testing.T) {
+ 	e := &GitHubCopilotExecutor{}
+ 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+ 	// Genuine multi-turn: user → assistant (plain text) → user follow-up.
+-	// Patch 001 forces X-Initiator to "agent" unconditionally.
++	// The first unseen follow-up should still bill as user.
+ 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
+ 	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, body)
+-	if got := req.Header.Get("X-Initiator"); got != "agent" {
+-		t.Fatalf("X-Initiator = %q, want agent", got)
++	if got := req.Header.Get("X-Initiator"); got != "user" {
++		t.Fatalf("X-Initiator = %q, want user", got)
+ 	}
+ }
+ 
+@@ -365,11 +382,62 @@ func TestApplyHeaders_XInitiator_UserFollowUpAfterToolHistory(t *testing.T) {
+ 	e := &GitHubCopilotExecutor{}
+ 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+ 	// User follow-up after a completed tool-use conversation.
+-	// Patch 001 forces X-Initiator to "agent" unconditionally.
++	// The first unseen follow-up should still bill as user.
+ 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"tool","tool_call_id":"tu1","content":"file data"},{"role":"assistant","content":"I read the file."},{"role":"user","content":"What did we do so far?"}]}`)
+ 	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, body)
++	if got := req.Header.Get("X-Initiator"); got != "user" {
++		t.Fatalf("X-Initiator = %q, want user", got)
++	}
++}
++
++func TestApplyHeaders_XInitiator_WarmConversationUsesAgent(t *testing.T) {
++	t.Parallel()
++	e := &GitHubCopilotExecutor{warmConversations: make(map[string]time.Time)}
++	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
++	e.markCopilotWarmConversation("token", rootBody)
++
++	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, false))
++	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, followUpBody)
++	if got := req.Header.Get("X-Initiator"); got != "agent" {
++		t.Fatalf("X-Initiator = %q, want agent for warmed conversation", got)
++	}
++}
++
++func TestApplyHeaders_XInitiator_WarmConversationNoiseUsesUser(t *testing.T) {
++	t.Parallel()
++	e := &GitHubCopilotExecutor{warmConversations: make(map[string]time.Time)}
++	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
++	e.markCopilotWarmConversation("token", rootBody)
++
++	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, true))
++	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, followUpBody)
++	if got := req.Header.Get("X-Initiator"); got != "user" {
++		t.Fatalf("X-Initiator = %q, want user for warm-conversation noise", got)
++	}
++}
++
++func TestApplyHeaders_XInitiator_PreviousResponseIDAlwaysAgent(t *testing.T) {
++	t.Parallel()
++	e := &GitHubCopilotExecutor{}
++	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
++	body := []byte(`{"previous_response_id":"resp_123","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"follow up"}]}]}`)
++	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, body)
++	if got := req.Header.Get("X-Initiator"); got != "agent" {
++		t.Fatalf("X-Initiator = %q, want agent when previous_response_id is present", got)
++	}
++}
++
++func TestApplyHeaders_XInitiator_NilBodyDefaultsAgent(t *testing.T) {
++	t.Parallel()
++	e := &GitHubCopilotExecutor{}
++	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
++	e.applyHeaders(req, "token", sdktranslator.FormatOpenAI, nil)
+ 	if got := req.Header.Get("X-Initiator"); got != "agent" {
+-		t.Fatalf("X-Initiator = %q, want agent", got)
++		t.Fatalf("X-Initiator = %q, want agent when body is unavailable", got)
+ 	}
+ }
+ 
