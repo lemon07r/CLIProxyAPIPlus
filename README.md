@@ -6,6 +6,8 @@ This repository is `lemon07r/CLIProxyAPIPlus`, a fork of the upstream [CLIProxyA
 
 Published images for this fork are available on Docker Hub as [`lemon07r/cli-proxy-api-plus`](https://hub.docker.com/r/lemon07r/cli-proxy-api-plus). On pushes to `main`, the fork's `build-and-push.yml` workflow syncs upstream, builds an ARM64 image, and pushes `latest`. Tagged builds use `docker-image.yml` for multi-arch releases.
 
+The current fork-specific stack is intentionally small: nine numbered patches grouped around Copilot routing/fingerprinting, Antigravity compatibility/fingerprinting, and one Claude streaming fix. When a later tweak is really just an extension of an existing feature, the preferred maintenance move is to fold it back into that patch instead of piling on more tiny follow-up patches.
+
 ## What Is Different In This Fork
 
 - Custom behavior lives in [`patches/`](patches/), not as long-lived source edits.
@@ -48,9 +50,15 @@ git checkout -- internal/ sdk/
 | `006-antigravity-anti-fingerprinting.patch` | Improves Antigravity session and fingerprint generation. |
 | `007-copilot-responses-vision-detection.patch` | Extends Copilot vision detection to the Responses API input format. |
 | `008-streaming-tool-call-deltas.patch` | Streams Claude tool call argument deltas incrementally in the Claude-to-OpenAI translator. |
-| `009-copilot-anti-fingerprinting.patch` | Adds per-account Copilot header diversity, persistent MachineId/SessionId behavior, and conversation-aware `X-Initiator` billing logic. |
-| `010-copilot-session-warm-keys.patch` | Keeps warmed Copilot sessions warm across transcript compaction by hashing stable execution/session identifiers in addition to the visible root prompt. |
-| `011-copilot-session-warm-reservation.patch` | Reserves new Copilot sessions while the first cold request is in flight so concurrent startup fan-out only bills one root per session. |
+| `009-copilot-anti-fingerprinting.patch` | Adds per-account Copilot header diversity, persistent MachineId/SessionId behavior, conversation-aware warm-session billing, compaction-stable warm keys, and cold-session startup reservation. |
+
+## Patch Layout
+
+- `001`, `002`, `007`, `009`: Copilot executor behavior, endpoint routing, and fingerprinting/session policy.
+- `003`, `004`, `005`, `006`: Antigravity request translation fixes plus anti-fingerprinting behavior.
+- `008`: Claude streaming translation fix.
+
+This split is deliberate. It keeps unrelated providers separated, but avoids stacking multiple tiny follow-up patches on the exact same Copilot session logic.
 
 ## Common Workflows
 
