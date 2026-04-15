@@ -50,6 +50,7 @@ git checkout -- internal/ sdk/
 | `008-streaming-tool-call-deltas.patch` | Streams Claude tool call argument deltas incrementally in the Claude-to-OpenAI translator. |
 | `009-copilot-anti-fingerprinting.patch` | Adds per-account Copilot header diversity, persistent MachineId/SessionId behavior, and conversation-aware `X-Initiator` billing logic. |
 | `010-copilot-session-warm-keys.patch` | Keeps warmed Copilot sessions warm across transcript compaction by hashing stable execution/session identifiers in addition to the visible root prompt. |
+| `011-copilot-session-warm-reservation.patch` | Reserves new Copilot sessions while the first cold request is in flight so concurrent startup fan-out only bills one root per session. |
 
 ## Common Workflows
 
