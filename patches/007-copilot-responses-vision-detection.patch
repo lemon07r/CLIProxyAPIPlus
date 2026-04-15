@@ -1,13 +1,14 @@
 # PATCH 007: Fix vision/image detection for Responses API format
 #
-# detectVisionContent only checked the messages array (Chat Completions format)
-# for image content. When requests arrive in Responses API format (e.g. from
-# opencode/ai-sdk), the body uses an input array with input_image type blocks
-# instead. This patch extends detectVisionContent to also scan the input array,
-# ensuring the Copilot-Vision-Request header is set correctly for codex models.
+# Extend detectVisionContent to cover both message.content input_image blocks and
+# direct input_image items inside Responses-style input arrays so the proxy sets
+# Copilot-Vision-Request consistently for Responses-routed models.
+
+diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
+index 3708140d..143b79a9 100644
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -542,25 +542,37 @@
+@@ -701,25 +701,41 @@ func isAgentInitiated(body []byte) bool {
  }
  
  // detectVisionContent checks if the request body contains vision/image content.
@@ -49,6 +50,10 @@
 +	inputResult := gjson.GetBytes(body, "input")
 +	if inputResult.Exists() && inputResult.IsArray() {
 +		for _, item := range inputResult.Array() {
++			itemType := item.Get("type").String()
++			if itemType == "input_image" || itemType == "image_url" || itemType == "image" {
++				return true
++			}
 +			// Check message items with content arrays
 +			content := item.Get("content")
 +			if content.IsArray() {
@@ -60,3 +65,30 @@
  				}
  			}
  		}
+diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/internal/runtime/executor/github_copilot_executor_test.go
+index d55d57a8..1596f8cd 100644
+--- a/internal/runtime/executor/github_copilot_executor_test.go
++++ b/internal/runtime/executor/github_copilot_executor_test.go
+@@ -447,6 +447,22 @@ func TestDetectVisionContent_WithImageType(t *testing.T) {
+ 	}
+ }
+ 
++func TestDetectVisionContent_WithResponsesInputImage(t *testing.T) {
++	t.Parallel()
++	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,abc"}]}]}`)
++	if !detectVisionContent(body) {
++		t.Fatal("expected responses input_image content to be detected")
++	}
++}
++
++func TestDetectVisionContent_WithDirectResponsesInputImageItem(t *testing.T) {
++	t.Parallel()
++	body := []byte(`{"input":[{"type":"input_image","image_url":"data:image/png;base64,abc"}]}`)
++	if !detectVisionContent(body) {
++		t.Fatal("expected direct input_image item to be detected")
++	}
++}
++
+ func TestDetectVisionContent_NoVision(t *testing.T) {
+ 	t.Parallel()
+ 	body := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)

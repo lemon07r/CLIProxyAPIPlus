@@ -45,10 +45,10 @@ git checkout -- internal/ sdk/
 | `001-unlimited-copilot-headers.patch` | Spoofs Copilot/VS Code headers and sets the Copilot header baseline used by the fork. |
 | `002-copilot-claude-endpoint.patch` | Routes Claude models to Copilot's `/v1/messages`, uses `/responses` for GPT-5.3/Codex-style models, strips the `copilot-` prefix, and improves Copilot Claude streaming/thinking behavior. |
 | `003-antigravity-claude-thinking-signature-fix.patch` | Fixes Claude thinking signature handling for Antigravity translators. |
-| `004-antigravity-assistant-prefill-fix.patch` | Fixes assistant prefill handling for Antigravity Claude/Gemini requests. |
+| `004-antigravity-assistant-prefill-fix.patch` | Rewrites Claude-model assistant prefill only in the Antigravity Gemini translator path. |
 | `005-antigravity-merge-consecutive-turns.patch` | Merges consecutive same-role turns for Antigravity backends. |
-| `006-antigravity-anti-fingerprinting.patch` | Improves Antigravity session and fingerprint generation. |
-| `007-copilot-responses-vision-detection.patch` | Extends Copilot vision detection to the Responses API input format. |
+| `006-antigravity-anti-fingerprinting.patch` | Adds per-account Antigravity fingerprinting on top of upstream version updates. |
+| `007-copilot-responses-vision-detection.patch` | Extends Copilot vision detection to Responses API `input[]` image items. |
 | `008-streaming-tool-call-deltas.patch` | Streams Claude tool call argument deltas incrementally in the Claude-to-OpenAI translator. |
 | `009-copilot-anti-fingerprinting.patch` | Adds per-account Copilot header diversity, persistent MachineId/SessionId behavior, conversation-aware warm-session billing, compaction-stable warm keys, and cold-session startup reservation. |
 

@@ -1,27 +1,14 @@
 # PATCH 008: Stream tool call deltas incrementally in Claude-to-OpenAI translator
 #
-# Previously, the Claude-to-OpenAI streaming translator accumulated tool_use
-# arguments silently (returning empty chunks at content_block_start and
-# input_json_delta events) and only emitted the complete tool call as a single
-# chunk at content_block_stop. This caused clients using the OpenAI endpoint
-# to not show "in progress" indicators for tool calls (e.g. "preparing write"),
-# since they never received incremental tool_call deltas during streaming.
-#
-# This patch changes the behavior to match OpenAI's native streaming format:
-# - content_block_start (tool_use): Immediately emits the tool call header
-#   (id, name, type) so clients can show the tool call is in progress
-# - input_json_delta: Streams each argument fragment as a separate chunk
-#   with tool_calls[].function.arguments containing the partial JSON
-# - content_block_stop: Only cleans up the accumulator (no output needed)
-#
-# This matches how the Responses API translator already handles tool calls
-# (response.output_item.added + response.function_call_arguments.delta).
-#
-# Applies after: 002-copilot-claude-endpoint.patch
+# Emit tool call headers at content_block_start and argument fragments at
+# input_json_delta so OpenAI-compatible streaming clients can surface in-flight
+# tool activity instead of waiting for content_block_stop.
+
 diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_response.go b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
+index 423beeba..89b74fba 100644
 --- a/internal/translator/claude/openai/chat-completions/claude_openai_response.go
 +++ b/internal/translator/claude/openai/chat-completions/claude_openai_response.go
-@@ -125,7 +125,7 @@
+@@ -125,7 +125,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
  			blockType := contentBlock.Get("type").String()
  
  			if blockType == "tool_use" {
@@ -30,7 +17,7 @@ diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_re
  				toolCallID := contentBlock.Get("id").String()
  				toolName := contentBlock.Get("name").String()
  				index := int(root.Get("index").Int())
-@@ -139,8 +139,13 @@
+@@ -139,8 +139,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
  					Name: toolName,
  				}
  
@@ -46,7 +33,7 @@ diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_re
  			}
  		}
  		return [][]byte{}
-@@ -165,16 +170,13 @@
+@@ -165,16 +170,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
  					hasContent = true
  				}
  			case "input_json_delta":
@@ -67,7 +54,7 @@ diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_re
  				return [][]byte{}
  			}
  		}
-@@ -185,26 +187,10 @@
+@@ -185,26 +187,10 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
  		}
  
  	case "content_block_stop":
@@ -96,3 +83,51 @@ diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_re
  		}
  		return [][]byte{}
  
+diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_response_test.go b/internal/translator/claude/openai/chat-completions/claude_openai_response_test.go
+index 7bd6eb1f..3348fcd2 100644
+--- a/internal/translator/claude/openai/chat-completions/claude_openai_response_test.go
++++ b/internal/translator/claude/openai/chat-completions/claude_openai_response_test.go
+@@ -56,3 +56,43 @@ func TestConvertClaudeResponseToOpenAINonStream_UsageIncludesCachedTokens(t *tes
+ 		t.Fatalf("expected cached_tokens %d, got %d", 22000, gotCachedTokens)
+ 	}
+ }
++
++func TestConvertClaudeResponseToOpenAI_StreamsToolCallHeaderImmediately(t *testing.T) {
++	ctx := context.Background()
++	var param any
++
++	ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, []byte(`data: {"type":"message_start","message":{"id":"msg_123"}}`), &param)
++	out := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"Write"}}`), &param)
++
++	if len(out) != 1 {
++		t.Fatalf("expected 1 chunk, got %d", len(out))
++	}
++	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.id").String(); got != "toolu_123" {
++		t.Fatalf("tool call id = %q, want toolu_123", got)
++	}
++	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "Write" {
++		t.Fatalf("tool call name = %q, want Write", got)
++	}
++	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "" {
++		t.Fatalf("tool call arguments = %q, want empty string", got)
++	}
++}
++
++func TestConvertClaudeResponseToOpenAI_StreamsToolCallArgumentDeltas(t *testing.T) {
++	ctx := context.Background()
++	var param any
++
++	ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, []byte(`data: {"type":"message_start","message":{"id":"msg_123"}}`), &param)
++	ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"Write"}}`), &param)
++	out := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-4-6", nil, nil, []byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"/tmp/x\"}"}}`), &param)
++
++	if len(out) != 1 {
++		t.Fatalf("expected 1 chunk, got %d", len(out))
++	}
++	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
++		t.Fatalf("tool call index = %d, want 0", got)
++	}
++	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"path":"/tmp/x"}` {
++		t.Fatalf("tool call arguments delta = %q, want partial json", got)
++	}
++}

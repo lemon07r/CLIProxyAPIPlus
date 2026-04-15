@@ -1,13 +1,14 @@
 # PATCH 005: Merge consecutive same-role turns for Gemini API compatibility
 #
-# The Gemini API rejects requests with consecutive messages from the same role.
-# This patch merges consecutive user or model turns into a single turn by
-# combining their parts arrays, which is required when tool results and user
-# messages end up adjacent after translation.
+# Gemini request.contents must alternate strictly between user and model turns.
+# Merge adjacent same-role contents after signature normalization so translated
+# requests do not hit alternating-role validation failures.
+
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+index 034809b6..65266439 100644
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-@@ -149,6 +149,29 @@
+@@ -181,6 +181,29 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _
  		})
  	}
  
@@ -35,5 +36,46 @@ diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.g
 +	}
 +
  	// Handle assistant prefill for Claude models routed via the Gemini translator
- 	if strings.Contains(modelName, "claude") {
+ 	if claudePrefillText != "" {
  		contents = gjson.GetBytes(rawJSON, "request.contents")
+diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go b/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
+index 83c130c0..22f1cff9 100644
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
+@@ -145,6 +145,36 @@ func TestConvertGeminiRequestToAntigravity_ClaudeThinkingTailDoesNotBecomeSynthe
+ 	}
+ }
+ 
++func TestConvertGeminiRequestToAntigravity_MergesConsecutiveSameRoleTurns(t *testing.T) {
++	inputJSON := []byte(`{
++		"model": "gemini-3-pro-preview",
++		"contents": [
++			{"role": "user", "parts": [{"text": "one"}]},
++			{"role": "user", "parts": [{"text": "two"}]},
++			{"role": "model", "parts": [{"text": "three"}]},
++			{"role": "model", "parts": [{"text": "four"}]}
++		]
++	}`)
++
++	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
++	contents := gjson.GetBytes(output, "request.contents").Array()
++	if len(contents) != 2 {
++		t.Fatalf("request.contents len = %d, want 2", len(contents))
++	}
++	if got := contents[0].Get("role").String(); got != "user" {
++		t.Fatalf("request.contents.0.role = %q, want user", got)
++	}
++	if got := contents[1].Get("role").String(); got != "model" {
++		t.Fatalf("request.contents.1.role = %q, want model", got)
++	}
++	if got := len(contents[0].Get("parts").Array()); got != 2 {
++		t.Fatalf("request.contents.0.parts len = %d, want 2", got)
++	}
++	if got := len(contents[1].Get("parts").Array()); got != 2 {
++		t.Fatalf("request.contents.1.parts len = %d, want 2", got)
++	}
++}
++
+ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
+ 	// When functionResponse contains a "parts" field with inlineData (from Claude
+ 	// translator's image embedding), fixCLIToolResponse should preserve it as-is.

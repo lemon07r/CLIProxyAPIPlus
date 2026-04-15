@@ -3,9 +3,10 @@
 # Consolidates the Copilot session-warm/fingerprint work into one patch.
 #
 diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
---- a/internal/runtime/executor/github_copilot_executor.go	2026-04-15 07:45:19.724578330 +0000
+index 143b79a9..6ae84e1b 100644
+--- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
-@@ -4,14 +4,22 @@
+@@ -4,14 +4,22 @@ import (
  	"bufio"
  	"bytes"
  	"context"
@@ -28,7 +29,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	"github.com/google/uuid"
  	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
  	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-@@ -46,13 +54,234 @@
+@@ -46,13 +54,234 @@ const (
  	copilotIntegrationID = "vscode-chat"
  	copilotOpenAIIntent  = "conversation-edits"
  	copilotGitHubAPIVer  = "2025-10-01"
@@ -266,7 +267,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  }
  
  // cachedAPIToken stores a cached Copilot API token with its expiry.
-@@ -64,10 +293,294 @@
+@@ -64,10 +293,294 @@ type cachedAPIToken struct {
  
  // NewGitHubCopilotExecutor constructs a new executor instance.
  func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
@@ -291,7 +292,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	dir := strings.TrimSpace(cfg.AuthDir)
 +	if dir == "" {
 +		return ""
-+	}
+ 	}
 +	return filepath.Join(dir, copilotWarmConversationStateFilename)
 +}
 +
@@ -312,7 +313,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	if err := json.Unmarshal(data, &raw); err != nil {
 +		log.Warnf("github-copilot executor: warm conversation cache decode error: %v", err)
 +		return
- 	}
++	}
 +
 +	now := time.Now()
 +	e.warmMu.Lock()
@@ -564,7 +565,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  }
  
  // Identifier implements ProviderExecutor.
-@@ -86,7 +599,7 @@
+@@ -86,7 +599,7 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
  	if errToken != nil {
  		return errToken
  	}
@@ -573,7 +574,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	return nil
  }
  
-@@ -171,7 +684,7 @@
+@@ -176,7 +689,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
  	if err != nil {
  		return resp, err
  	}
@@ -582,7 +583,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  
  	// Add Copilot-Vision-Request header if the request contains vision content
  	if !useClaude && hasVision {
-@@ -199,6 +712,7 @@
+@@ -204,6 +717,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
  	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -590,7 +591,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		recordAPIResponseError(ctx, e.cfg, err)
  		return resp, err
  	}
-@@ -211,6 +725,7 @@
+@@ -216,6 +730,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
  	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
  
  	if !isHTTPSuccess(httpResp.StatusCode) {
@@ -598,7 +599,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		data, _ := io.ReadAll(httpResp.Body)
  		appendAPIResponseChunk(ctx, e.cfg, data)
  		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-@@ -220,10 +735,12 @@
+@@ -225,10 +740,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
  
  	data, err := io.ReadAll(httpResp.Body)
  	if err != nil {
@@ -610,8 +611,8 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	e.markCopilotWarmConversation(ctx, opts, apiToken, body)
  
  	// Stabilize encrypted IDs in non-streaming Responses API output.
- 	if isGPT5Model(req.Model) {
-@@ -316,7 +833,7 @@
+ 	if useResponses {
+@@ -325,7 +842,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
  	if err != nil {
  		return nil, err
  	}
@@ -620,7 +621,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  
  	// Add Copilot-Vision-Request header if the request contains vision content
  	if !useClaude && hasVision {
-@@ -344,6 +861,7 @@
+@@ -353,6 +870,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
  	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -628,7 +629,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		recordAPIResponseError(ctx, e.cfg, err)
  		return nil, err
  	}
-@@ -351,6 +869,7 @@
+@@ -360,6 +878,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
  	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
  
  	if !isHTTPSuccess(httpResp.StatusCode) {
@@ -636,7 +637,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		data, readErr := io.ReadAll(httpResp.Body)
  		if errClose := httpResp.Body.Close(); errClose != nil {
  			log.Errorf("github-copilot executor: close response body error: %v", errClose)
-@@ -365,6 +884,8 @@
+@@ -374,6 +893,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
  		return nil, err
  	}
  
@@ -645,7 +646,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	out := make(chan cliproxyexecutor.StreamChunk)
  
  	go func() {
-@@ -555,20 +1076,45 @@
+@@ -564,20 +1085,45 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
@@ -699,11 +700,11 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	if isCopilotClaudeFormat(format) {
  		r.Header.Set("anthropic-beta", copilotThinkingBeta)
  	}
-
 diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/internal/runtime/executor/github_copilot_executor_test.go
---- a/internal/runtime/executor/github_copilot_executor_test.go	2026-04-15 07:45:19.728578345 +0000
+index 1596f8cd..639e2fb3 100644
+--- a/internal/runtime/executor/github_copilot_executor_test.go
 +++ b/internal/runtime/executor/github_copilot_executor_test.go
-@@ -2,11 +2,14 @@
+@@ -2,12 +2,15 @@ package executor
  
  import (
  	"context"
@@ -714,11 +715,12 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
 +	"time"
  
  	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 +	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
  	"github.com/tidwall/gjson"
-@@ -278,14 +281,28 @@
+@@ -322,14 +325,28 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
  
  // --- Tests for X-Initiator detection logic (Problem L) ---
  
@@ -750,7 +752,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
-@@ -293,11 +310,12 @@
+@@ -337,11 +354,12 @@ func TestApplyHeaders_XInitiator_AgentWhenLastUserButHistoryHasAssistant(t *test
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
@@ -767,7 +769,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
-@@ -307,7 +325,7 @@
+@@ -351,7 +369,7 @@ func TestApplyHeaders_XInitiator_AgentWithToolRole(t *testing.T) {
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// When the last message has role "tool", it's clearly agent-initiated.
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
@@ -776,7 +778,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (tool role exists)", got)
  	}
-@@ -318,7 +336,7 @@
+@@ -362,7 +380,7 @@ func TestApplyHeaders_XInitiator_InputArrayLastAssistantMessage(t *testing.T) {
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hi"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]}`)
@@ -785,7 +787,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last role is assistant)", got)
  	}
-@@ -330,7 +348,7 @@
+@@ -374,7 +392,7 @@ func TestApplyHeaders_XInitiator_InputArrayAgentWhenLastUserButHistoryHasAssista
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// Responses API: last item is user-role but history contains assistant → agent.
  	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I can help"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Do X"}]}]}`)
@@ -794,7 +796,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last role is user)", got)
  	}
-@@ -341,7 +359,7 @@
+@@ -385,7 +403,7 @@ func TestApplyHeaders_XInitiator_InputArrayLastFunctionCallOutput(t *testing.T)
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Use tool"}]},{"type":"function_call","call_id":"c1","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`)
@@ -803,7 +805,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last item maps to tool role)", got)
  	}
-@@ -352,11 +370,11 @@
+@@ -396,11 +414,11 @@ func TestApplyHeaders_XInitiator_UserInMultiTurnNoTools(t *testing.T) {
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// Genuine multi-turn: user → assistant (plain text) → user follow-up.
@@ -819,7 +821,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
-@@ -365,11 +383,187 @@
+@@ -409,11 +427,187 @@ func TestApplyHeaders_XInitiator_UserFollowUpAfterToolHistory(t *testing.T) {
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// User follow-up after a completed tool-use conversation.
@@ -1010,7 +1012,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
-@@ -379,7 +573,7 @@
+@@ -423,7 +617,7 @@ func TestApplyHeaders_GitHubAPIVersion(t *testing.T) {
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
@@ -1019,7 +1021,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Github-Api-Version"); got != "2025-10-01" {
  		t.Fatalf("X-Github-Api-Version = %q, want 2025-10-01", got)
  	}
-@@ -528,7 +722,7 @@
+@@ -588,7 +782,7 @@ func TestApplyHeaders_OpenAIIntentValue(t *testing.T) {
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)

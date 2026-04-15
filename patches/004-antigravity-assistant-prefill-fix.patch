@@ -1,82 +1,23 @@
-# PATCH 004: Handle assistant message prefill for Claude models via Antigravity
+# PATCH 004: Handle assistant prefill for Claude models via Antigravity Gemini translator
 #
-# When clients (e.g. opencode, Claude Code) send a Claude API request with
-# assistant prefill (last message has role "assistant" with partial content),
-# the Antigravity/Gemini backend rejects it.
+# Some Claude-model requests routed through the Antigravity Gemini translator end with
+# a trailing model text turn used as assistant prefill. That shape can be rejected by
+# the upstream backend, so rewrite only that narrow case into a synthetic user
+# continuation hint.
 #
-# This patch handles it in both Claude-to-Antigravity and Gemini-to-Antigravity
-# translators (scoped to Claude models only) by:
-# 1. Detecting trailing "model" messages without functionCall parts
-# 2. Extracting text content as prefill
-# 3. Removing the trailing model message
-# 4. Appending a synthetic user message with continuation hint
-#
-# Native Gemini models are unaffected.
-diff --git a/internal/translator/antigravity/claude/antigravity_claude_request.go b/internal/translator/antigravity/claude/antigravity_claude_request.go
---- a/internal/translator/antigravity/claude/antigravity_claude_request.go
-+++ b/internal/translator/antigravity/claude/antigravity_claude_request.go
-@@ -418,6 +418,53 @@
- 		}
- 	}
- 
-+	// Handle assistant prefill: if the last message has role "model", the Antigravity
-+	// API will reject the request. Extract the prefill text and replace it with a
-+	// synthetic user message.
-+	if hasContents {
-+		contentsArray := gjson.ParseBytes(contentsJSON).Array()
-+		if len(contentsArray) > 0 {
-+			lastContent := contentsArray[len(contentsArray)-1]
-+			if lastContent.Get("role").String() == "model" {
-+				hasFunctionCall := false
-+				lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
-+					if part.Get("functionCall").Exists() {
-+						hasFunctionCall = true
-+						return false
-+					}
-+					return true
-+				})
-+
-+				if !hasFunctionCall {
-+					var prefillTexts []string
-+					lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
-+						if t := part.Get("text").String(); t != "" {
-+							prefillTexts = append(prefillTexts, t)
-+						}
-+						return true
-+					})
-+
-+					trimmedContents := []byte(`[]`)
-+					for idx := 0; idx < len(contentsArray)-1; idx++ {
-+						trimmedContents, _ = sjson.SetRawBytes(trimmedContents, "-1", []byte(contentsArray[idx].Raw))
-+					}
-+					contentsJSON = trimmedContents
-+
-+					if len(prefillTexts) > 0 {
-+						prefill := strings.Join(prefillTexts, "")
-+						syntheticUser := `{"role":"user","parts":[]}`
-+						partJSON := `{}`
-+						partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+prefill)
-+						syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
-+						contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", []byte(syntheticUser))
-+					}
-+
-+					hasContents = len(gjson.ParseBytes(contentsJSON).Array()) > 0
-+				}
-+			}
-+		}
-+	}
-+
- 	// tools
- 	var toolsJSON []byte
- 	toolDeclCount := 0
+# This is intentionally NOT applied to the Claude-to-Antigravity translator: plain
+# trailing assistant history there is preserved to avoid rewriting normal assistant
+# turns and thinking blocks.
+
 diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.go b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
+index 196cccd8..034809b6 100644
 --- a/internal/translator/antigravity/gemini/antigravity_gemini_request.go
 +++ b/internal/translator/antigravity/gemini/antigravity_gemini_request.go
-@@ -149,6 +149,49 @@
+@@ -80,6 +80,38 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _
  		})
  	}
  
-+	// Handle assistant prefill for Claude models routed via the Gemini translator
++	claudePrefillText := ""
 +	if strings.Contains(modelName, "claude") {
 +		contents = gjson.GetBytes(rawJSON, "request.contents")
 +		if contents.Exists() && contents.IsArray() {
@@ -85,35 +26,52 @@ diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.g
 +				lastContent := contentsArray[len(contentsArray)-1]
 +				if lastContent.Get("role").String() == "model" {
 +					hasFunctionCall := false
++					hasThought := false
++					var prefillTexts []string
 +					lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
 +						if part.Get("functionCall").Exists() {
 +							hasFunctionCall = true
 +							return false
 +						}
++						if part.Get("thought").Bool() {
++							hasThought = true
++						}
++						if t := part.Get("text").String(); t != "" {
++							prefillTexts = append(prefillTexts, t)
++						}
 +						return true
 +					})
-+
-+					if !hasFunctionCall {
-+						var prefillTexts []string
-+						lastContent.Get("parts").ForEach(func(_, part gjson.Result) bool {
-+							if t := part.Get("text").String(); t != "" {
-+								prefillTexts = append(prefillTexts, t)
-+							}
-+							return true
-+						})
-+
-+						lastIdx := len(contentsArray) - 1
-+						rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("request.contents.%d", lastIdx))
-+
-+						if len(prefillTexts) > 0 {
-+							prefill := strings.Join(prefillTexts, "")
-+							syntheticUser := `{"role":"user","parts":[]}`
-+							partJSON := `{}`
-+							partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+prefill)
-+							syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
-+							rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.-1", []byte(syntheticUser))
-+						}
++					if !hasFunctionCall && !hasThought && len(prefillTexts) > 0 {
++						claudePrefillText = strings.Join(prefillTexts, "")
 +					}
++				}
++			}
++		}
++	}
++
+ 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
+ 	if toolsResult.Exists() && toolsResult.IsArray() {
+ 		toolResults := toolsResult.Array()
+@@ -149,6 +181,27 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _
+ 		})
+ 	}
+ 
++	// Handle assistant prefill for Claude models routed via the Gemini translator
++	if claudePrefillText != "" {
++		contents = gjson.GetBytes(rawJSON, "request.contents")
++		if contents.Exists() && contents.IsArray() {
++			contentsArray := contents.Array()
++			if len(contentsArray) > 0 {
++				lastContent := contentsArray[len(contentsArray)-1]
++				if lastContent.Get("role").String() == "model" {
++					lastIdx := len(contentsArray) - 1
++					rawJSON, _ = sjson.DeleteBytes(rawJSON, fmt.Sprintf("request.contents.%d", lastIdx))
++
++					syntheticUser := `{"role":"user","parts":[]}`
++					partJSON := `{}`
++					partJSON, _ = sjson.Set(partJSON, "text", "Continue from: "+claudePrefillText)
++					syntheticUser, _ = sjson.SetRaw(syntheticUser, "parts.-1", partJSON)
++					rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.-1", []byte(syntheticUser))
 +				}
 +			}
 +		}
@@ -122,3 +80,65 @@ diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request.g
  	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
  }
  
+diff --git a/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go b/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
+index 7e9e3bba..83c130c0 100644
+--- a/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
++++ b/internal/translator/antigravity/gemini/antigravity_gemini_request_test.go
+@@ -94,6 +94,57 @@ func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
+ 	}
+ }
+ 
++func TestConvertGeminiRequestToAntigravity_ClaudePrefillBecomesSyntheticUser(t *testing.T) {
++	inputJSON := []byte(`{
++		"model": "claude-opus-4-6",
++		"contents": [
++			{
++				"role": "user",
++				"parts": [{"text": "Write a function"}]
++			},
++			{
++				"role": "model",
++				"parts": [{"text": "Here is the start"}]
++			}
++		]
++	}`)
++
++	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6", inputJSON, false)
++	if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "user" {
++		t.Fatalf("request.contents.1.role = %q, want user", got)
++	}
++	if got := gjson.GetBytes(output, "request.contents.1.parts.0.text").String(); got != "Continue from: Here is the start" {
++		t.Fatalf("request.contents.1.parts.0.text = %q, want continuation hint", got)
++	}
++}
++
++func TestConvertGeminiRequestToAntigravity_ClaudeThinkingTailDoesNotBecomeSyntheticUser(t *testing.T) {
++	inputJSON := []byte(`{
++		"model": "claude-opus-4-6",
++		"contents": [
++			{
++				"role": "user",
++				"parts": [{"text": "Solve it"}]
++			},
++			{
++				"role": "model",
++				"parts": [
++					{"text": "internal", "thought": true, "thoughtSignature": "sig"},
++					{"text": "Answer"}
++				]
++			}
++		]
++	}`)
++
++	output := ConvertGeminiRequestToAntigravity("claude-opus-4-6", inputJSON, false)
++	if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "model" {
++		t.Fatalf("request.contents.1.role = %q, want model", got)
++	}
++	if got := gjson.GetBytes(output, "request.contents.1.parts.0.text").String(); got != "Answer" {
++		t.Fatalf("request.contents.1.parts.0.text = %q, want Answer", got)
++	}
++}
++
+ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
+ 	// When functionResponse contains a "parts" field with inlineData (from Claude
+ 	// translator's image embedding), fixCLIToolResponse should preserve it as-is.
