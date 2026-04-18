@@ -1,3 +1,12 @@
+# PATCH 009: Copilot anti-fingerprinting and conversation-aware initiator control
+#
+# Restores the fork-specific Copilot fingerprinting behavior on top of the
+# current upstream executor:
+# - deterministic per-account header fingerprints and VS Code IDs
+# - warm-conversation tracking with persistent cache across restarts
+# - active execution sessions stay agent-initiated once warm
+# - restored warm roots ramp real initiator probability from 0% over time
+# - targeted regression tests for the warm/fingerprint helpers
 diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/runtime/executor/github_copilot_executor.go
 --- a/internal/runtime/executor/github_copilot_executor.go
 +++ b/internal/runtime/executor/github_copilot_executor.go
@@ -24,14 +33,15 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	"github.com/google/uuid"
  	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
  	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-@@ -45,13 +53,42 @@
+@@ -45,13 +53,43 @@
  	copilotOpenAIIntent  = "conversation-edits"
  	copilotGitHubAPIVer  = "2025-10-01"
  	copilotThinkingBeta  = "interleaved-thinking-2025-05-14,context-management-2025-06-27"
 +
-+	copilotWarmConversationRealRatio       = 0.02
 +	copilotSessionRotation                 = 4 * time.Hour
 +	copilotWarmConversationTTL             = 6 * time.Hour
++	copilotWarmConversationRealStep        = 0.005
++	copilotWarmConversationRealStepWindow  = 2 * time.Hour
 +	copilotWarmConversationReservationTTL  = 45 * time.Second
 +	copilotWarmConversationCleanupInterval = 15 * time.Minute
 +	copilotWarmConversationStateFilename   = "copilot-warm-conversations.json"
@@ -65,13 +75,25 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	warmCleanupOnce      sync.Once
 +	warmPersistMu        sync.Mutex
 +	warmStatePath        string
-+	warmConversations    map[string]time.Time
++	warmConversations    map[string]copilotWarmConversationState
 +	warmingConversations map[string]time.Time
  }
  
  // cachedAPIToken stores a cached Copilot API token with its expiry.
-@@ -63,12 +100,483 @@
+@@ -61,12 +99,580 @@
+ 	expiresAt   time.Time
+ }
  
++type copilotWarmConversationState struct {
++	LastRealRequestAt time.Time
++	ExpiresAt         time.Time
++}
++
++type copilotWarmConversationDiskState struct {
++	LastRealRequestUnix int64 `json:"last_real_request_unix"`
++	ExpiresUnix         int64 `json:"expires_unix"`
++}
++
  // NewGitHubCopilotExecutor constructs a new executor instance.
  func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
 -	return &GitHubCopilotExecutor{
@@ -81,7 +103,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		cfg:                  cfg,
 +		cache:                make(map[string]*cachedAPIToken),
 +		warmStatePath:        copilotWarmConversationStatePath(cfg),
-+		warmConversations:    make(map[string]time.Time),
++		warmConversations:    make(map[string]copilotWarmConversationState),
 +		warmingConversations: make(map[string]time.Time),
 +	}
 +	e.loadCopilotWarmConversations()
@@ -115,8 +137,37 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	return float64(value>>11) / (1 << 53)
 +}
 +
-+func copilotShouldUseWarmConversationRealInitiator(apiToken, requestID string) bool {
-+	return copilotHashUnitInterval(apiToken, requestID, "warm-real-initiator") < copilotWarmConversationRealRatio
++func copilotWarmConversationStateIsWarm(state copilotWarmConversationState, now time.Time) bool {
++	return !state.ExpiresAt.IsZero() && state.ExpiresAt.After(now)
++}
++
++func copilotWarmConversationStateEqual(a, b copilotWarmConversationState) bool {
++	return a.LastRealRequestAt.Equal(b.LastRealRequestAt) && a.ExpiresAt.Equal(b.ExpiresAt)
++}
++
++func copilotWarmConversationRealInitiatorRatio(lastRealRequestAt, now time.Time) float64 {
++	if lastRealRequestAt.IsZero() || !now.After(lastRealRequestAt) || copilotWarmConversationRealStepWindow <= 0 {
++		return 0
++	}
++
++	steps := int(now.Sub(lastRealRequestAt) / copilotWarmConversationRealStepWindow)
++	if steps <= 0 {
++		return 0
++	}
++
++	maxSteps := int((copilotWarmConversationTTL - time.Nanosecond) / copilotWarmConversationRealStepWindow)
++	if maxSteps < 1 {
++		maxSteps = 1
++	}
++	if steps > maxSteps {
++		steps = maxSteps
++	}
++
++	return float64(steps) * copilotWarmConversationRealStep
++}
++
++func copilotShouldUseWarmConversationRealInitiator(apiToken, requestID string, ratio float64) bool {
++	return ratio > 0 && copilotHashUnitInterval(apiToken, requestID, "warm-real-initiator") < ratio
 +}
 +
 +func copilotWarmConversationStatePath(cfg *config.Config) string {
@@ -143,34 +194,56 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		return
 +	}
 +
-+	raw := make(map[string]int64)
-+	if err := json.Unmarshal(data, &raw); err != nil {
-+		log.Warnf("github-copilot executor: warm conversation cache decode error: %v", err)
-+		return
-+	}
-+
 +	now := time.Now()
 +	e.warmMu.Lock()
 +	defer e.warmMu.Unlock()
-+	for key, unixExpiry := range raw {
++
++	current := make(map[string]copilotWarmConversationDiskState)
++	if err := json.Unmarshal(data, &current); err == nil {
++		for key, diskState := range current {
++			expiresAt := time.Unix(diskState.ExpiresUnix, 0)
++			if !expiresAt.After(now) {
++				continue
++			}
++			lastRealRequestAt := time.Unix(diskState.LastRealRequestUnix, 0)
++			if diskState.LastRealRequestUnix <= 0 || lastRealRequestAt.After(expiresAt) {
++				lastRealRequestAt = expiresAt.Add(-copilotWarmConversationTTL)
++			}
++			e.warmConversations[key] = copilotWarmConversationState{
++				LastRealRequestAt: lastRealRequestAt,
++				ExpiresAt:         expiresAt,
++			}
++		}
++		return
++	}
++
++	legacy := make(map[string]int64)
++	if err := json.Unmarshal(data, &legacy); err != nil {
++		log.Warnf("github-copilot executor: warm conversation cache decode error: %v", err)
++		return
++	}
++	for key, unixExpiry := range legacy {
 +		expiresAt := time.Unix(unixExpiry, 0)
 +		if expiresAt.After(now) {
-+			e.warmConversations[key] = expiresAt
++			e.warmConversations[key] = copilotWarmConversationState{
++				LastRealRequestAt: expiresAt.Add(-copilotWarmConversationTTL),
++				ExpiresAt:         expiresAt,
++			}
 +		}
- 	}
- }
- 
-+func (e *GitHubCopilotExecutor) snapshotCopilotWarmConversationsLocked(now time.Time) map[string]time.Time {
-+	snapshot := make(map[string]time.Time, len(e.warmConversations))
-+	for key, expiresAt := range e.warmConversations {
-+		if expiresAt.After(now) {
-+			snapshot[key] = expiresAt
++	}
++}
++
++func (e *GitHubCopilotExecutor) snapshotCopilotWarmConversationsLocked(now time.Time) map[string]copilotWarmConversationState {
++	snapshot := make(map[string]copilotWarmConversationState, len(e.warmConversations))
++	for key, state := range e.warmConversations {
++		if copilotWarmConversationStateIsWarm(state, now) {
++			snapshot[key] = state
 +		}
 +	}
 +	return snapshot
 +}
 +
-+func (e *GitHubCopilotExecutor) persistCopilotWarmConversations(snapshot map[string]time.Time) {
++func (e *GitHubCopilotExecutor) persistCopilotWarmConversations(snapshot map[string]copilotWarmConversationState) {
 +	if e.warmStatePath == "" {
 +		return
 +	}
@@ -190,9 +263,12 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		return
 +	}
 +
-+	payload := make(map[string]int64, len(snapshot))
-+	for key, expiresAt := range snapshot {
-+		payload[key] = expiresAt.Unix()
++	payload := make(map[string]copilotWarmConversationDiskState, len(snapshot))
++	for key, state := range snapshot {
++		payload[key] = copilotWarmConversationDiskState{
++			LastRealRequestUnix: state.LastRealRequestAt.Unix(),
++			ExpiresUnix:         state.ExpiresAt.Unix(),
++		}
 +	}
 +
 +	data, err := json.Marshal(payload)
@@ -227,7 +303,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +func (e *GitHubCopilotExecutor) purgeExpiredCopilotWarmConversations() {
 +	now := time.Now()
 +	dirty := false
-+	var snapshot map[string]time.Time
++	var snapshot map[string]copilotWarmConversationState
 +
 +	e.warmMu.Lock()
 +	for key, expiresAt := range e.warmingConversations {
@@ -235,8 +311,8 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +			delete(e.warmingConversations, key)
 +		}
 +	}
-+	for key, expiresAt := range e.warmConversations {
-+		if !expiresAt.After(now) {
++	for key, state := range e.warmConversations {
++		if !copilotWarmConversationStateIsWarm(state, now) {
 +			delete(e.warmConversations, key)
 +			dirty = true
 +		}
@@ -251,28 +327,26 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	}
 +}
 +
-+func (e *GitHubCopilotExecutor) isCopilotWarmConversation(key string) bool {
++func (e *GitHubCopilotExecutor) getCopilotWarmConversationStateAt(key string, now time.Time) (copilotWarmConversationState, bool) {
 +	if key == "" {
-+		return false
++		return copilotWarmConversationState{}, false
 +	}
 +
 +	e.ensureCopilotWarmConversationCleanup()
-+
-+	now := time.Now()
 +	e.warmMu.RLock()
-+	expiresAt, ok := e.warmConversations[key]
++	state, ok := e.warmConversations[key]
 +	e.warmMu.RUnlock()
 +	if !ok {
-+		return false
++		return copilotWarmConversationState{}, false
 +	}
-+	if expiresAt.After(now) {
-+		return true
++	if copilotWarmConversationStateIsWarm(state, now) {
++		return state, true
 +	}
 +
-+	var snapshot map[string]time.Time
++	var snapshot map[string]copilotWarmConversationState
 +	dirty := false
 +	e.warmMu.Lock()
-+	if latest, ok := e.warmConversations[key]; ok && !latest.After(now) {
++	if latest, ok := e.warmConversations[key]; ok && !copilotWarmConversationStateIsWarm(latest, now) {
 +		delete(e.warmConversations, key)
 +		snapshot = e.snapshotCopilotWarmConversationsLocked(now)
 +		dirty = true
@@ -281,7 +355,11 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	if dirty {
 +		e.persistCopilotWarmConversations(snapshot)
 +	}
-+	return false
++	return copilotWarmConversationState{}, false
++}
++
++func (e *GitHubCopilotExecutor) getCopilotWarmConversationState(key string) (copilotWarmConversationState, bool) {
++	return e.getCopilotWarmConversationStateAt(key, time.Now())
 +}
 +
 +func (e *GitHubCopilotExecutor) reserveCopilotWarmConversation(keys []string) bool {
@@ -307,7 +385,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	}
 +
 +	for _, key := range keys {
-+		if expiresAt, ok := e.warmConversations[key]; ok && expiresAt.After(now) {
++		if state, ok := e.warmConversations[key]; ok && copilotWarmConversationStateIsWarm(state, now) {
 +			return false
 +		}
 +		if expiresAt, ok := e.warmingConversations[key]; ok && expiresAt.After(now) {
@@ -438,7 +516,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		}
 +		seen[key] = struct{}{}
 +		keys = append(keys, key)
-+	}
+ 	}
 +
 +	addKey(copilotWarmConversationRootKey(apiToken, body))
 +	addKey(copilotWarmConversationSessionKey(apiToken, copilotExecutionSessionID(ctx, opts)))
@@ -464,7 +542,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	e.warmMu.Unlock()
 +}
 +
-+func (e *GitHubCopilotExecutor) markCopilotWarmConversation(ctx context.Context, opts cliproxyexecutor.Options, apiToken string, body []byte) {
++func (e *GitHubCopilotExecutor) markCopilotWarmConversation(ctx context.Context, opts cliproxyexecutor.Options, apiToken string, body []byte, initiator string) {
 +	keys := copilotWarmConversationKeys(ctx, opts, apiToken, body)
 +	if len(keys) == 0 {
 +		return
@@ -473,33 +551,60 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	e.ensureCopilotWarmConversationCleanup()
 +
 +	now := time.Now()
-+	newExpiry := now.Add(copilotWarmConversationTTL)
-+	refreshThreshold := now.Add(copilotWarmConversationTTL / 2)
-+	var snapshot map[string]time.Time
++	var snapshot map[string]copilotWarmConversationState
 +
 +	e.warmMu.Lock()
 +	if e.warmConversations == nil {
-+		e.warmConversations = make(map[string]time.Time)
++		e.warmConversations = make(map[string]copilotWarmConversationState)
 +	}
 +	if e.warmingConversations == nil {
 +		e.warmingConversations = make(map[string]time.Time)
 +	}
-+	refreshNeeded := false
++
++	var baseState copilotWarmConversationState
++	hasBaseState := false
 +	for _, key := range keys {
 +		delete(e.warmingConversations, key)
-+		if expiresAt, ok := e.warmConversations[key]; !ok || !expiresAt.After(refreshThreshold) {
-+			refreshNeeded = true
++		if state, ok := e.warmConversations[key]; ok && copilotWarmConversationStateIsWarm(state, now) {
++			if !hasBaseState || state.ExpiresAt.After(baseState.ExpiresAt) {
++				baseState = state
++				hasBaseState = true
++			}
 +		}
 +	}
-+	if refreshNeeded {
-+		for _, key := range keys {
-+			e.warmConversations[key] = newExpiry
++
++	var nextState copilotWarmConversationState
++	switch strings.TrimSpace(initiator) {
++	case "user":
++		nextState = copilotWarmConversationState{
++			LastRealRequestAt: now,
++			ExpiresAt:         now.Add(copilotWarmConversationTTL),
 +		}
++	case "agent":
++		if !hasBaseState {
++			e.warmMu.Unlock()
++			return
++		}
++		nextState = baseState
++	default:
++		e.warmMu.Unlock()
++		return
++	}
++
++	changed := false
++	for _, key := range keys {
++		if state, ok := e.warmConversations[key]; ok && copilotWarmConversationStateIsWarm(state, now) && copilotWarmConversationStateEqual(state, nextState) {
++			continue
++		}
++		e.warmConversations[key] = nextState
++		changed = true
++	}
++	if changed {
 +		snapshot = e.snapshotCopilotWarmConversationsLocked(now)
 +	}
 +	e.warmMu.Unlock()
 +
-+	if refreshNeeded {
++	if changed {
 +		e.persistCopilotWarmConversations(snapshot)
 +	}
 +}
@@ -516,16 +621,20 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +	if len(keys) == 0 {
 +		return false
 +	}
++	now := time.Now()
 +	sessionKey := copilotWarmConversationSessionKey(apiToken, copilotExecutionSessionID(ctx, opts))
-+	if sessionKey != "" && e.isCopilotWarmConversation(sessionKey) {
-+		return true
++	if sessionKey != "" {
++		if _, ok := e.getCopilotWarmConversationStateAt(sessionKey, now); ok {
++			return true
++		}
 +	}
 +	for _, key := range keys {
 +		if key == sessionKey {
 +			continue
 +		}
-+		if e.isCopilotWarmConversation(key) {
-+			return !copilotShouldUseWarmConversationRealInitiator(apiToken, requestID)
++		if state, ok := e.getCopilotWarmConversationStateAt(key, now); ok {
++			ratio := copilotWarmConversationRealInitiatorRatio(state.LastRealRequestAt, now)
++			return !copilotShouldUseWarmConversationRealInitiator(apiToken, requestID, ratio)
 +		}
 +	}
 +	if e.reserveCopilotWarmConversation(keys) {
@@ -552,12 +661,10 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +		return ""
 +	}
 +	return strings.TrimSpace(auth.Attributes["api_key"])
-+}
-+
- // Identifier implements ProviderExecutor.
- func (e *GitHubCopilotExecutor) Identifier() string { return githubCopilotAuthType }
+ }
  
-@@ -85,7 +593,7 @@
+ // Identifier implements ProviderExecutor.
+@@ -85,7 +691,7 @@
  	if errToken != nil {
  		return errToken
  	}
@@ -566,7 +673,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	return nil
  }
  
-@@ -107,10 +615,16 @@
+@@ -107,10 +713,16 @@
  
  // Execute handles non-streaming requests to GitHub Copilot.
  func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -580,12 +687,12 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +			e.clearCopilotWarmConversationReservation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload)
 +			return resp, err
 +		}
-+		e.markCopilotWarmConversation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload)
++		e.markCopilotWarmConversation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload, nativeAuth.Attributes["header:X-Initiator"])
 +		return resp, nil
  	}
  
  	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
-@@ -169,7 +683,7 @@
+@@ -169,7 +781,7 @@
  	if err != nil {
  		return resp, err
  	}
@@ -594,7 +701,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  
  	// Add Copilot-Vision-Request header if the request contains vision content
  	if hasVision {
-@@ -197,6 +711,7 @@
+@@ -197,6 +809,7 @@
  	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -602,7 +709,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		recordAPIResponseError(ctx, e.cfg, err)
  		return resp, err
  	}
-@@ -209,6 +724,7 @@
+@@ -209,6 +822,7 @@
  	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
  
  	if !isHTTPSuccess(httpResp.StatusCode) {
@@ -610,7 +717,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		data, _ := io.ReadAll(httpResp.Body)
  		appendAPIResponseChunk(ctx, e.cfg, data)
  		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-@@ -218,10 +734,12 @@
+@@ -218,10 +832,12 @@
  
  	data, err := io.ReadAll(httpResp.Body)
  	if err != nil {
@@ -619,11 +726,11 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		return resp, err
  	}
  	appendAPIResponseChunk(ctx, e.cfg, data)
-+	e.markCopilotWarmConversation(ctx, opts, apiToken, body)
++	e.markCopilotWarmConversation(ctx, opts, apiToken, body, strings.TrimSpace(httpReq.Header.Get("X-Initiator")))
  
  	detail := parseOpenAIUsage(data)
  	if useResponses && detail.TotalTokens == 0 {
-@@ -246,10 +764,16 @@
+@@ -246,10 +862,16 @@
  
  // ExecuteStream handles streaming requests to GitHub Copilot.
  func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -637,12 +744,12 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
 +			e.clearCopilotWarmConversationReservation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload)
 +			return nil, execErr
 +		}
-+		e.markCopilotWarmConversation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload)
++		e.markCopilotWarmConversation(ctx, opts, copilotAPIKeyFromAuth(nativeAuth), req.Payload, nativeAuth.Attributes["header:X-Initiator"])
 +		return result, nil
  	}
  
  	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
-@@ -312,7 +836,7 @@
+@@ -312,7 +934,7 @@
  	if err != nil {
  		return nil, err
  	}
@@ -651,7 +758,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  
  	// Add Copilot-Vision-Request header if the request contains vision content
  	if hasVision {
-@@ -340,6 +864,7 @@
+@@ -340,6 +962,7 @@
  	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
@@ -659,7 +766,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		recordAPIResponseError(ctx, e.cfg, err)
  		return nil, err
  	}
-@@ -347,6 +872,7 @@
+@@ -347,6 +970,7 @@
  	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
  
  	if !isHTTPSuccess(httpResp.StatusCode) {
@@ -667,16 +774,16 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		data, readErr := io.ReadAll(httpResp.Body)
  		if errClose := httpResp.Body.Close(); errClose != nil {
  			log.Errorf("github-copilot executor: close response body error: %v", errClose)
-@@ -361,6 +887,8 @@
+@@ -361,6 +985,8 @@
  		return nil, err
  	}
  
-+	e.markCopilotWarmConversation(ctx, opts, apiToken, body)
++	e.markCopilotWarmConversation(ctx, opts, apiToken, body, strings.TrimSpace(httpReq.Header.Get("X-Initiator")))
 +
  	out := make(chan cliproxyexecutor.StreamChunk)
  
  	go func() {
-@@ -436,7 +964,7 @@
+@@ -436,7 +1062,7 @@
  // CountTokens estimates token count locally using tiktoken, since the GitHub
  // Copilot API does not expose a dedicated token counting endpoint.
  func (e *GitHubCopilotExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -685,7 +792,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  		return cliproxyexecutor.Response{}, errGateway
  	} else if ok {
  		return nativeExec.CountTokens(ctx, nativeAuth, nativeReq, opts)
-@@ -490,6 +1018,7 @@
+@@ -490,6 +1116,7 @@
  	ctx context.Context,
  	auth *cliproxyauth.Auth,
  	req cliproxyexecutor.Request,
@@ -693,7 +800,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  ) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, bool, error) {
  	if !githubCopilotUsesAnthropicGateway(req.Model) {
  		return nil, nil, req, false, nil
-@@ -501,7 +1030,7 @@
+@@ -501,7 +1128,7 @@
  	if err != nil {
  		return nil, nil, req, false, err
  	}
@@ -702,7 +809,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	if nativeAuth == nil {
  		return nil, nil, req, false, nil
  	}
-@@ -514,7 +1043,7 @@
+@@ -514,7 +1141,7 @@
  	return strings.HasPrefix(baseModel, "claude-")
  }
  
@@ -711,7 +818,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	apiToken = strings.TrimSpace(apiToken)
  	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
  	if apiToken == "" || baseURL == "" {
-@@ -529,22 +1058,26 @@
+@@ -529,22 +1156,26 @@
  	if nativeAuth.Attributes == nil {
  		nativeAuth.Attributes = make(map[string]string)
  	}
@@ -747,7 +854,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor.go b/internal/run
  	if detectVisionContent(body) {
  		nativeAuth.Attributes["header:Copilot-Vision-Request"] = "true"
  	}
-@@ -601,20 +1134,29 @@
+@@ -601,20 +1232,29 @@
  }
  
  // applyHeaders sets the required headers for GitHub Copilot API requests.
@@ -796,21 +903,25 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	"io"
  	"net/http"
  	"net/http/httptest"
-@@ -330,12 +331,26 @@
+@@ -330,12 +331,30 @@
  
  // --- Tests for X-Initiator detection logic (Problem L) ---
  
-+func findCopilotWarmConversationRequestID(t *testing.T, wantReal bool) string {
++func findCopilotWarmConversationRequestID(t *testing.T, ratio float64, wantReal bool) string {
 +	t.Helper()
 +
-+	for i := 0; i < 10000; i++ {
++	if !wantReal && ratio <= 0 {
++		return "req-0"
++	}
++
++	for i := 0; i < 100000; i++ {
 +		requestID := fmt.Sprintf("req-%d", i)
-+		if copilotShouldUseWarmConversationRealInitiator("token", requestID) == wantReal {
++		if copilotShouldUseWarmConversationRealInitiator("token", requestID, ratio) == wantReal {
 +			return requestID
 +		}
 +	}
 +
-+	t.Fatalf("could not find request ID with wantReal=%v", wantReal)
++	t.Fatalf("could not find request ID with ratio=%v wantReal=%v", ratio, wantReal)
 +	return ""
 +}
 +
@@ -824,7 +935,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "user" {
  		t.Fatalf("X-Initiator = %q, want user", got)
  	}
-@@ -349,7 +364,7 @@
+@@ -349,7 +368,7 @@
  	// the request is a continuation (e.g. Claude tool result translated to a
  	// synthetic user message). Should be "agent".
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"file contents..."}]}]}`)
@@ -833,7 +944,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last user contains tool_result)", got)
  	}
-@@ -361,7 +376,7 @@
+@@ -361,7 +380,7 @@
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// When the last message has role "tool", it's clearly agent-initiated.
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
@@ -842,7 +953,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last role is tool)", got)
  	}
-@@ -372,7 +387,7 @@
+@@ -372,7 +391,7 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Hi"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}]}`)
@@ -851,7 +962,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last role is assistant)", got)
  	}
-@@ -384,7 +399,7 @@
+@@ -384,7 +403,7 @@
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	// Responses API: last item is user-role but history contains assistant → agent.
  	body := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I can help"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Do X"}]}]}`)
@@ -860,7 +971,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (history has assistant)", got)
  	}
-@@ -395,7 +410,7 @@
+@@ -395,7 +414,7 @@
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
  	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Use tool"}]},{"type":"function_call","call_id":"c1","name":"Read","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"ok"}]}`)
@@ -869,7 +980,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "agent" {
  		t.Fatalf("X-Initiator = %q, want agent (last item maps to tool role)", got)
  	}
-@@ -408,7 +423,7 @@
+@@ -408,7 +427,7 @@
  	// Genuine multi-turn: user → assistant (plain text) → user follow-up.
  	// No tool messages → should be "user" (not a false-positive).
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
@@ -878,7 +989,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("X-Initiator"); got != "user" {
  		t.Fatalf("X-Initiator = %q, want user (genuine multi-turn, no tools)", got)
  	}
-@@ -422,21 +437,128 @@
+@@ -422,21 +441,229 @@
  	// The last message is a genuine user question — should be "user", not "agent".
  	// This aligns with opencode's behavior: only active tool loops are agent-initiated.
  	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"tool","tool_call_id":"tu1","content":"file data"},{"role":"assistant","content":"I read the file."},{"role":"user","content":"What did we do so far?"}]}`)
@@ -889,39 +1000,70 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
++func TestCopilotWarmConversationRealInitiatorRatio(t *testing.T) {
++	t.Parallel()
++
++	now := time.Unix(1_762_000_000, 0)
++	tests := []struct {
++		name     string
++		lastReal time.Time
++		want     float64
++	}{
++		{name: "zero before first step", lastReal: now.Add(-90 * time.Minute), want: 0},
++		{name: "first step after two hours", lastReal: now.Add(-2 * time.Hour), want: 0.005},
++		{name: "second step after four hours", lastReal: now.Add(-4 * time.Hour), want: 0.01},
++		{name: "clamped before expiry", lastReal: now.Add(-(copilotWarmConversationTTL - time.Minute)), want: 0.01},
++	}
++
++	for _, tt := range tests {
++		tt := tt
++		t.Run(tt.name, func(t *testing.T) {
++			t.Parallel()
++			if got := copilotWarmConversationRealInitiatorRatio(tt.lastReal, now); got != tt.want {
++				t.Fatalf("ratio = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
++
 +func TestApplyHeaders_XInitiator_WarmConversationUsesAgent(t *testing.T) {
 +	t.Parallel()
 +
 +	e := &GitHubCopilotExecutor{
-+		warmConversations: make(map[string]time.Time),
++		warmConversations: make(map[string]copilotWarmConversationState),
 +	}
 +	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 +	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
-+	e.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody)
++	e.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody, "user")
 +
 +	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-+	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, false))
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, 0, false))
 +	e.applyHeaders(req, "token", followUpBody, nil, cliproxyexecutor.Options{})
 +	if got := req.Header.Get("X-Initiator"); got != "agent" {
 +		t.Fatalf("X-Initiator = %q, want agent for warmed conversation", got)
 +	}
 +}
 +
-+func TestApplyHeaders_XInitiator_WarmConversationNoiseUsesUser(t *testing.T) {
++func TestApplyHeaders_XInitiator_WarmConversationUsesRampedUserNoise(t *testing.T) {
 +	t.Parallel()
 +
-+	e := &GitHubCopilotExecutor{
-+		warmConversations: make(map[string]time.Time),
-+	}
-+	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	now := time.Now()
 +	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
-+	e.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody)
++	rootKey := copilotWarmConversationRootKey("token", followUpBody)
++	e := &GitHubCopilotExecutor{
++		warmConversations: map[string]copilotWarmConversationState{
++			rootKey: {
++				LastRealRequestAt: now.Add(-4 * time.Hour),
++				ExpiresAt:         now.Add(2 * time.Hour),
++			},
++		},
++	}
 +
 +	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-+	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, true))
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, 0.01, true))
 +	e.applyHeaders(req, "token", followUpBody, nil, cliproxyexecutor.Options{})
 +	if got := req.Header.Get("X-Initiator"); got != "user" {
-+		t.Fatalf("X-Initiator = %q, want user for warm-conversation noise", got)
++		t.Fatalf("X-Initiator = %q, want user for ramped warm-conversation noise", got)
 +	}
 +}
 +
@@ -929,7 +1071,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
 +	t.Parallel()
 +
 +	e := &GitHubCopilotExecutor{
-+		warmConversations: make(map[string]time.Time),
++		warmConversations: make(map[string]copilotWarmConversationState),
 +	}
 +	sessionID := "ses_test_warm_session"
 +	opts := cliproxyexecutor.Options{
@@ -937,13 +1079,83 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
 +	}
 +	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 +	branchedRootBody := []byte(`{"messages":[{"role":"user","content":"branch from the earlier point"}]}`)
-+	e.markCopilotWarmConversation(nil, opts, "token", rootBody)
++	e.markCopilotWarmConversation(nil, opts, "token", rootBody, "user")
 +
 +	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-+	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, true))
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, 0.01, true))
 +	e.applyHeaders(req, "token", branchedRootBody, nil, opts)
 +	if got := req.Header.Get("X-Initiator"); got != "agent" {
 +		t.Fatalf("X-Initiator = %q, want agent for active warm execution session", got)
++	}
++}
++
++func TestMarkCopilotWarmConversation_AgentPreservesLastRealAndCopiesSessionKey(t *testing.T) {
++	t.Parallel()
++
++	now := time.Now()
++	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	sessionID := "ses_test_copy"
++	opts := cliproxyexecutor.Options{
++		Headers: http.Header{copilotWarmConversationSessionHeader: []string{sessionID}},
++	}
++	rootKey := copilotWarmConversationRootKey("token", rootBody)
++	sessionKey := copilotWarmConversationSessionKey("token", sessionID)
++	existing := copilotWarmConversationState{
++		LastRealRequestAt: now.Add(-4 * time.Hour),
++		ExpiresAt:         now.Add(2 * time.Hour),
++	}
++
++	e := &GitHubCopilotExecutor{
++		warmConversations: map[string]copilotWarmConversationState{
++			rootKey: existing,
++		},
++	}
++
++	e.markCopilotWarmConversation(nil, opts, "token", rootBody, "agent")
++
++	gotRoot, ok := e.getCopilotWarmConversationState(rootKey)
++	if !ok {
++		t.Fatal("expected root key to remain warm")
++	}
++	if !copilotWarmConversationStateEqual(gotRoot, existing) {
++		t.Fatalf("root state changed unexpectedly: got %+v want %+v", gotRoot, existing)
++	}
++	gotSession, ok := e.getCopilotWarmConversationState(sessionKey)
++	if !ok {
++		t.Fatal("expected session key to inherit warm state")
++	}
++	if !copilotWarmConversationStateEqual(gotSession, existing) {
++		t.Fatalf("session state = %+v, want %+v", gotSession, existing)
++	}
++}
++
++func TestMarkCopilotWarmConversation_UserResetsSessionWindow(t *testing.T) {
++	t.Parallel()
++
++	rootBody := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
++	rootKey := copilotWarmConversationRootKey("token", rootBody)
++	e := &GitHubCopilotExecutor{
++		warmConversations: map[string]copilotWarmConversationState{
++			rootKey: {
++				LastRealRequestAt: time.Now().Add(-4 * time.Hour),
++				ExpiresAt:         time.Now().Add(2 * time.Hour),
++			},
++		},
++	}
++
++	before := time.Now()
++	e.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody, "user")
++	after := time.Now()
++
++	state, ok := e.getCopilotWarmConversationState(rootKey)
++	if !ok {
++		t.Fatal("expected root key to remain warm")
++	}
++	if state.LastRealRequestAt.Before(before) || state.LastRealRequestAt.After(after) {
++		t.Fatalf("last real request timestamp = %v, want between %v and %v", state.LastRealRequestAt, before, after)
++	}
++	if state.ExpiresAt.Before(before.Add(copilotWarmConversationTTL)) || state.ExpiresAt.After(after.Add(copilotWarmConversationTTL)) {
++		t.Fatalf("expires_at = %v, want reset to a fresh %v window", state.ExpiresAt, copilotWarmConversationTTL)
 +	}
 +}
 +
@@ -955,11 +1167,11 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
 +	followUpBody := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"Hi there!"},{"role":"user","content":"what is 2+2?"}]}`)
 +
 +	e1 := NewGitHubCopilotExecutor(cfg)
-+	e1.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody)
++	e1.markCopilotWarmConversation(nil, cliproxyexecutor.Options{}, "token", rootBody, "user")
 +
 +	e2 := NewGitHubCopilotExecutor(cfg)
 +	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-+	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, false))
++	req.Header.Set("X-Request-Id", findCopilotWarmConversationRequestID(t, 0, false))
 +	e2.applyHeaders(req, "token", followUpBody, nil, cliproxyexecutor.Options{})
 +	if got := req.Header.Get("X-Initiator"); got != "agent" {
 +		t.Fatalf("X-Initiator = %q, want agent for warmed conversation restored from disk", got)
@@ -1011,7 +1223,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  }
  
-@@ -599,7 +721,7 @@
+@@ -599,7 +826,7 @@
  	t.Parallel()
  	e := &GitHubCopilotExecutor{}
  	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
@@ -1020,7 +1232,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	if got := req.Header.Get("Openai-Intent"); got != "conversation-edits" {
  		t.Fatalf("Openai-Intent = %q, want conversation-edits", got)
  	}
-@@ -664,6 +786,8 @@
+@@ -664,6 +891,8 @@
  	var gotEditorVersion string
  	var gotIntent string
  	var gotInitiator string
@@ -1029,7 +1241,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	var gotBody []byte
  
  	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-@@ -674,6 +798,8 @@
+@@ -674,6 +903,8 @@
  		gotEditorVersion = r.Header.Get("Editor-Version")
  		gotIntent = r.Header.Get("Openai-Intent")
  		gotInitiator = r.Header.Get("X-Initiator")
@@ -1038,7 +1250,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  		gotBody, _ = io.ReadAll(r.Body)
  		w.Header().Set("Content-Type", "application/json")
  		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-@@ -712,8 +838,9 @@
+@@ -712,8 +943,9 @@
  	if gotAPIVersion != copilotGitHubAPIVer {
  		t.Fatalf("X-Github-Api-Version = %q, want %q", gotAPIVersion, copilotGitHubAPIVer)
  	}
@@ -1050,7 +1262,7 @@ diff --git a/internal/runtime/executor/github_copilot_executor_test.go b/interna
  	}
  	if gotIntent != copilotOpenAIIntent {
  		t.Fatalf("Openai-Intent = %q, want %q", gotIntent, copilotOpenAIIntent)
-@@ -727,6 +854,9 @@
+@@ -727,6 +959,9 @@
  	if gjson.GetBytes(resp.Payload, "content.0.text").String() != "ok" {
  		t.Fatalf("response text = %q, want %q", gjson.GetBytes(resp.Payload, "content.0.text").String(), "ok")
  	}
