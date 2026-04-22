@@ -63,9 +63,14 @@ const (
 	refreshCheckInterval  = 5 * time.Second
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 1 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshFailureBackoff = 5 * time.Minute
+	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
+	// success but the auth still evaluates as needing refresh (e.g. token expiry
+	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
+	// burn CPU at idle.
+	refreshIneffectiveBackoff = 30 * time.Second
+	quotaBackoffBase          = time.Second
+	quotaBackoffMax           = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -3237,11 +3242,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	// Preserve NextRefreshAfter set by the Authenticator
-	// If the Authenticator set a reasonable refresh time, it should not be overwritten
-	// If the Authenticator did not set it (zero value), shouldRefresh will use default logic
+	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	if m.shouldRefresh(updated, now) {
+		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
+	}
 	_, _ = m.Update(ctx, updated)
 }
 

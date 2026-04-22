@@ -1,154 +1,211 @@
-# CLIProxyAPI Plus
+# CLI Proxy API
 
-English | [Chinese](README_CN.md)
+English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-This repository is `lemon07r/CLIProxyAPIPlus`, a fork of the upstream [CLIProxyAPI Plus](https://github.com/router-for-me/CLIProxyAPIPlus) branch. The fork stays close to upstream and carries a small patch stack for Copilot and Antigravity behavior that is applied during Docker builds.
+A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
 
-Published images for this fork are available on Docker Hub as [`lemon07r/cli-proxy-api-plus`](https://hub.docker.com/r/lemon07r/cli-proxy-api-plus). On pushes to `main`, the fork's `build-and-push.yml` workflow syncs upstream, builds an ARM64 image, and pushes `latest`. Tagged builds use `docker-image.yml` for multi-arch releases.
+It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
-The current fork-specific stack is intentionally small: ten numbered patches grouped around Copilot routing/fingerprinting, Antigravity compatibility/fingerprinting, a Claude streaming fix, and Kimi K2.6 coding-model support. When a later tweak is really just an extension of an existing feature, the preferred maintenance move is to fold it back into that patch instead of piling on more tiny follow-up patches.
+So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
 
-## What Is Different In This Fork
+## Sponsor
 
-- Custom behavior lives in [`patches/`](patches/), not as long-lived source edits.
-- The Docker build applies patch files in lexical order during `docker build` and fails fast if one goes stale.
-- The goal is to stay mergeable with upstream while keeping the fork-specific behavior isolated.
+[![z.ai](https://assets.router-for.me/english-5-0.jpg)](https://z.ai/subscribe?ic=8JVLJQFSKB)
 
-If you change Go source directly and commit that source change instead of updating the matching patch file, the next upstream sync will overwrite your work. For fork maintenance, treat the patch files as the real source of truth.
+This project is sponsored by Z.ai, supporting us with their GLM CODING PLAN.
 
-## How The Patch Build Works
+GLM CODING PLAN is a subscription service designed for AI coding, starting at just $10/month. It provides access to their flagship GLM-4.7 & （GLM-5 Only Available  for Pro Users）model across 10+ popular AI coding tools (Claude Code, Cline, Roo Code, etc.), offering developers top-tier, fast, and stable coding experiences.
 
-1. The repo tracks upstream normally.
-2. Fork changes live as numbered patch files in [`patches/`](patches/).
-3. [`Dockerfile`](Dockerfile) copies the repo, then applies `patches/*.patch` in sorted order and fails the build if any patch is stale.
-4. The patched tree is compiled into the final `CLIProxyAPIPlus` binary.
+Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
-That means the important workflow is:
+---
 
-```bash
-# 1. Apply earlier patches to get the right baseline
-git apply patches/001-unlimited-copilot-headers.patch
-# ...apply through the patch before the one you are editing
+<table>
+<tbody>
+<tr>
+<td width="180"><a href="https://www.packyapi.com/register?aff=cliproxyapi"><img src="./assets/packycode.png" alt="PackyCode" width="150"></a></td>
+<td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. PackyCode provides special discounts for our software users: register using <a href="https://www.packyapi.com/register?aff=cliproxyapi">this link</a> and enter the "cliproxyapi" promo code during recharge to get 10% off.</td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
+<td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CLIProxyAPI users: register via <a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+</tr>
+<tr>
+<td width="180"><a href="https://shop.bmoplus.com/?utm_source=github"><img src="./assets/bmoplus.png" alt="BmoPlus" width="150"></a></td>
+<td>Huge thanks to BmoPlus for sponsoring this project! BmoPlus is a highly reliable AI account provider built strictly for heavy AI users and developers. They offer rock-solid, ready-to-use accounts and official top-up services for ChatGPT Plus / ChatGPT Pro (Full Warranty) / Claude Pro / Super Grok / Gemini Pro. By registering and ordering through <a href="https://shop.bmoplus.com/?utm_source=github">BmoPlus - Premium AI Accounts & Top-ups</a>, users can unlock the mind-blowing rate of <b>10% of the official GPT subscription price (90% OFF)</b>!</td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.lingtrue.com/register"><img src="./assets/lingtrue.png" alt="LingtrueAPI" width="150"></a></td>
+<td>Thanks to LingtrueAPI for its sponsorship of this project! LingtrueAPI is a global large - model API intermediary service platform that provides API calling services for various top - notch models such as Claude Code, Codex, and Gemini. It is committed to enabling users to connect to global AI capabilities at low cost and with high stability. LingtrueAPI offers special discounts to users of this software: register using <a href="https://www.lingtrue.com/register">this link</a>, and enter the promo code "LingtrueAPI" when making the first recharge to enjoy a 10% discount.</td>
+</tr>
+<tr>
+<td width="180"><a href="https://poixe.com/i/m8kvep"><img src="./assets/poixeai.png" alt="PoixeAI" width="150"></a></td>
+<td>Thanks to Poixe AI for sponsoring this project! Poixe AI provides reliable LLM API services. You can leverage the platform's API endpoints to seamlessly build AI-powered products. Additionally, you can become a vendor by providing AI API resources to the platform and earn revenue. Register through the exclusive CLIProxyAPI <a href="https://poixe.com/i/m8kvep">referral link</a> and receive a bonus of $5 USD on your first top-up.</td>
+</tr>
+<tr>
+<td width="180"><a href="https://coder.visioncoder.cn"><img src="./assets/visioncoder.png" alt="VisionCoder" width="150"></a></td>
+<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn" target="_blank">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity.
+<p></p>
+VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn" target="_blank">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
+</tr>
+</tbody>
+</table>
 
-# 2. Edit the source file temporarily
+## Overview
 
-# 3. Generate/update the patch file
+- OpenAI/Gemini/Claude compatible API endpoints for CLI models
+- OpenAI Codex support (GPT models) via OAuth login
+- Claude Code support via OAuth login
+- Amp CLI and IDE extensions support with provider routing
+- Streaming and non-streaming responses
+- Function calling/tools support
+- Multimodal input support (text and images)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude)
+- Simple CLI authentication flows (Gemini, OpenAI, Claude)
+- Generative Language API Key support
+- AI Studio Build multi-account load balancing
+- Gemini CLI multi-account load balancing
+- Claude Code multi-account load balancing
+- OpenAI Codex multi-account load balancing
+- OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
-# 4. Revert temporary source edits before committing
-git checkout -- internal/ sdk/
-```
+## Getting Started
 
-## Patch Stack
+CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
-| Patch | Purpose |
-|---|---|
-| `001-unlimited-copilot-headers.patch` | Spoofs Copilot/VS Code headers and sets the Copilot header baseline used by the fork. |
-| `002-copilot-claude-endpoint.patch` | Keeps Copilot alias handling working after upstream Claude routing landed by stripping the `copilot-` prefix inside executor endpoint selection, native gateway detection, token counting, and model normalization. |
-| `003-antigravity-claude-thinking-signature-fix.patch` | Fixes Claude thinking signature handling for Antigravity translators. |
-| `004-antigravity-assistant-prefill-fix.patch` | Rewrites Claude-model assistant prefill only in the Antigravity Gemini translator path. |
-| `005-antigravity-merge-consecutive-turns.patch` | Merges consecutive same-role turns for Antigravity backends. |
-| `006-antigravity-anti-fingerprinting.patch` | Adds per-account Antigravity fingerprinting on top of upstream version updates. |
-| `007-copilot-responses-vision-detection.patch` | Extends Copilot vision detection to Responses API `input[]` image items. |
-| `008-streaming-tool-call-deltas.patch` | Streams Claude tool call argument deltas incrementally in the Claude-to-OpenAI translator. |
-| `009-copilot-anti-fingerprinting.patch` | Adds deterministic per-account Copilot header fingerprints, persistent MachineId/SessionId behavior, warm-conversation tracking across restarts, and conversation-aware `X-Initiator` control for native Claude traffic. |
-| `010-kimi-k26-support.patch` | Kimi K2.6 (`kimi-for-coding`) support: updated `kimi_cli/1.35.0` headers (UA, `X-Msh-Version`, `X-Msh-Os-Version`) in both chat traffic and OAuth device-flow, whitelists `kimi-for-coding` in prefix stripping, emits `thinking.type="enabled"` alongside `reasoning_effort`, attaches a deterministic `prompt_cache_key` for `kimi-for-coding` only, and registers a static `kimi-for-coding` model entry. Scoped entirely to the Kimi provider. |
+## Management API
 
-## Patch Layout
+see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
-- `001`, `002`, `007`, `009`: Copilot executor behavior, endpoint routing, and fingerprinting/session policy.
-- `003`, `004`, `005`, `006`: Antigravity request translation fixes plus anti-fingerprinting behavior.
-- `008`: Claude streaming translation fix.
-- `010`: Kimi provider support for the K2.6 coding model (`kimi-for-coding`) — headers, prefix handling, thinking wire format, prompt caching, and model registry.
+## Amp CLI Support
 
-This split is deliberate. It keeps unrelated providers separated, but avoids stacking multiple tiny follow-up patches on the exact same Copilot session logic.
+CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
 
-## Common Workflows
+- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
+- Management proxy for OAuth authentication and account features
+- Smart model fallback with automatic routing
+- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
+- Security-first design with localhost-only management endpoints
 
-### Run The Prebuilt Image
+When you need the request/response shape of a specific backend family, use the provider-specific paths instead of the merged `/v1/...` endpoints:
 
-```bash
-./docker-build.sh
-# choose option 1
-```
+- Use `/api/provider/{provider}/v1/messages` for messages-style backends.
+- Use `/api/provider/{provider}/v1beta/models/...` for model-scoped generate endpoints.
+- Use `/api/provider/{provider}/v1/chat/completions` for chat-completions backends.
 
-Or directly:
+These routes help you select the protocol surface, but they do not by themselves guarantee a unique inference executor when the same client-visible model name is reused across multiple backends. Inference routing is still resolved from the request model/alias. For strict backend pinning, use unique aliases, prefixes, or otherwise avoid overlapping client-visible model names.
 
-```bash
-docker compose up -d --remove-orphans --no-build
-```
+**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
-### Build From Source Locally
+## SDK Docs
 
-```bash
-./docker-build.sh
-# choose option 2
-```
-
-Or directly:
-
-```bash
-docker build -t cliproxy-api-plus:local .
-docker compose up -d --remove-orphans --pull never
-```
-
-### Build An x86/amd64 Image On ARM
-
-If you are on an ARM VPS but need to test the x86 build locally:
-
-```bash
-docker buildx build --platform linux/amd64 -t cliproxy-api-plus:amd64 --load .
-```
-
-If you want to publish that image instead of loading it into the local Docker daemon:
-
-```bash
-docker buildx build --platform linux/amd64 -t yourname/cli-proxy-api-plus:amd64 --push .
-```
-
-### Test The Patch Chain Cleanly
-
-```bash
-git checkout -- internal/ sdk/
-
-for patch in patches/*.patch; do
-  git apply "$patch"
-done
-
-docker run --rm -v "$PWD:/src" -w /src golang:1.26-alpine \
-  sh -lc '/usr/local/go/bin/go test ./internal/runtime/executor -run "TestApplyHeaders_XInitiator|TestApplyHeaders_GitHubAPIVersion|TestApplyHeaders_OpenAIIntentValue"'
-
-git checkout -- internal/ sdk/
-```
-
-### Push A Fork Change Live
-
-```bash
-git add patches/ README.md
-git commit -m "your message"
-git push origin main
-```
-
-After that:
-
-- `build-and-push.yml` builds and publishes the ARM64 Docker image
-- tagged builds can use `docker-image.yml` for multi-arch releases
-- if your server uses watchtower, it will pull the new `latest` automatically
-- if not, pull and restart manually with `docker compose pull && docker compose up -d`
-
-## Repo Layout Notes
-
-- [`docker-compose.yml`](docker-compose.yml) is the repo-local compose file for building or running this repo directly.
-- [`docker-build.sh`](docker-build.sh) is the easiest beginner-friendly entry point for local builds.
-- [`config.example.yaml`](config.example.yaml) is the main config reference.
-- Production deployments often keep a separate runtime directory that mounts `config.yaml`, `auths/`, and `logs/` into the container instead of running straight from the git checkout.
-
-All third-party provider support is maintained by community contributors; upstream CLIProxyAPI does not provide technical support for fork-specific changes. If you need help with this fork, contact the corresponding fork maintainer.
+- Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
+- Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
+- Access: [docs/sdk-access.md](docs/sdk-access.md)
+- Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+- Custom Provider Example: `examples/custom-provider`
 
 ## Contributing
 
-This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## Who is with us?
+
+Those projects are based on CLIProxyAPI:
+
+### [vibeproxy](https://github.com/automazeio/vibeproxy)
+
+Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
+
+### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
+
+Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
+
+### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
+
+CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
+
+### [Quotio](https://github.com/nguyenphutrong/quotio)
+
+Native macOS menu bar app that unifies Claude, Gemini, OpenAI, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
+
+### [CodMate](https://github.com/loocor/CodMate)
+
+Native macOS SwiftUI app for managing CLI AI sessions (Codex, Claude Code, Gemini CLI) with unified provider management, Git review, project organization, global search, and terminal integration. Integrates CLIProxyAPI to provide OAuth authentication for Codex, Claude, Gemini, and Antigravity, with built-in and third-party provider rerouting through a single proxy endpoint - no API keys needed for OAuth providers.
+
+### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
+
+Windows-native CLIProxyAPI fork with TUI, system tray, and multi-provider OAuth for AI coding tools - no API keys needed.
+
+### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
+
+VSCode extension for quick switching between Claude Code models, featuring integrated CLIProxyAPI as its backend with automatic background lifecycle management.
+
+### [ZeroLimit](https://github.com/0xtbug/zero-limit)
+
+Windows desktop app built with Tauri + React for monitoring AI coding assistant quotas via CLIProxyAPI. Track usage across Gemini, Claude, OpenAI Codex, and Antigravity accounts with real-time dashboard, system tray integration, and one-click proxy control - no API keys needed.
+
+### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
+
+A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update, request statistics and pricing display. Supports one-click installation and systemd service.
+
+### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
+
+A Windows tray application implemented using PowerShell scripts, without relying on any third-party libraries. The main features include: automatic creation of shortcuts, silent running, password management, channel switching (Main / Plus), and automatic downloading and updating.
+
+### [霖君](https://github.com/wangdabaoqq/LinJun)
+
+霖君 is a cross-platform desktop application for managing AI programming assistants, supporting macOS, Windows, and Linux systems. Unified management of Claude Code, Gemini CLI, OpenAI Codex, and other AI coding tools, with local proxy for multi-account quota tracking and one-click configuration.
+
+### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
+
+A modern web-based management dashboard for CLIProxyAPI built with Next.js, React, and PostgreSQL. Features real-time log streaming, structured configuration editing, API key management, OAuth provider integration for Claude/Gemini/Codex, usage analytics, container management, and config sync with OpenCode via companion plugin - no manual YAML editing needed.
+
+### [All API Hub](https://github.com/qixing-jk/all-api-hub)
+
+Browser extension for one-stop management of New API-compatible relay site accounts, featuring balance and usage dashboards, auto check-in, one-click key export to common apps, in-page API availability testing, and channel/model sync and redirection. It integrates with CLIProxyAPI through the Management API for one-click provider import and config sync.
+
+### [Shadow AI](https://github.com/HEUDavid/shadow-ai)
+
+Shadow AI is an AI assistant tool designed specifically for restricted environments. It provides a stealthy operation
+mode without windows or traces, and enables cross-device AI Q&A interaction and control via the local area network (
+LAN). Essentially, it is an automated collaboration layer of "screen/audio capture + AI inference + low-friction delivery",
+helping users to immersively use AI assistants across applications on controlled devices or in restricted environments.
+
+### [ProxyPal](https://github.com/buddingnewinsights/proxypal)
+
+Cross-platform desktop app (macOS, Windows, Linux) wrapping CLIProxyAPI with a native GUI. Connects Claude, ChatGPT, Gemini, GitHub Copilot, and custom OpenAI-compatible endpoints with usage analytics, request monitoring, and auto-configuration for popular coding tools - no API keys needed.
+
+### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
+
+Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-account codex 5h/7d quota windows, plan-based sorting, status coloring, and multi-account summary analytics.
+
+> [!NOTE]  
+> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
+
+## More choices
+
+Those projects are ports of CLIProxyAPI or inspired by it:
+
+### [9Router](https://github.com/decolua/9router)
+
+A Next.js implementation inspired by CLIProxyAPI, easy to install and use, built from scratch with format translation (OpenAI/Claude/Gemini/Ollama), combo system with auto-fallback, multi-account management with exponential backoff, a Next.js web dashboard, and support for CLI tools (Cursor, Claude Code, Cline, RooCode) - no API keys needed.
+
+### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
+
+Never stop coding. Smart routing to FREE & low-cost AI models with automatic fallback.
+
+OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing, retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
+
+> [!NOTE]  
+> If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
 
 ## License
 
