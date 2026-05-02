@@ -1,30 +1,19 @@
-# PATCH 011: Merge parallel tool results into single Claude messages
 #
-# Fixes a Claude API validation error that occurs when AI coding agents
-# (e.g. OpenCode, Junie) make parallel tool calls:
+# Fixes Claude API tool_use/tool_result adjacency for agent clients that
+# round-trip OpenAI Chat Completions and Responses tool turns through CLIProxy.
 #
-#   "messages.N: `tool_use` ids were found without `tool_result` blocks
-#    immediately after: toolu_XXX. Each `tool_use` block must have a
-#    corresponding `tool_result` block in the next message."
-#
-# Root cause: both the Chat Completions and Responses API translators
-# created a separate user message for each tool result. When an assistant
-# turn contains multiple parallel tool_use blocks, Claude requires ALL
-# corresponding tool_result blocks in a single user message immediately
-# after. The old code split them across multiple user messages, so only
-# the first tool_result was in the "immediately after" position.
+# Root cause: the prior patch merged only consecutive parallel tool results.
+# OpenAI Responses can also split one logical turn across adjacent `message`,
+# `function_call`, and `function_call_output` items. Reconstructing those as
+# separate Claude messages can leave tool_result blocks outside the immediate
+# next user message after tool_use.
 #
 # Changes:
-#   - claude_openai_request.go (Chat Completions translator):
-#       * Consecutive "tool" role messages are merged into one user
-#         message with multiple tool_result content blocks
-#   - claude_openai-responses_request.go (Responses API translator):
-#       * Consecutive function_call items are merged into one assistant
-#         message with multiple tool_use content blocks
-#       * Consecutive function_call_output items are merged into one
-#         user message with multiple tool_result content blocks
-#   - claude_openai_request_test.go:
-#       * Test for parallel tool result merging
+#   - Chat Completions translator keeps parallel tool_result blocks merged
+#   - Responses translator merges assistant text + function_call items into one
+#     assistant Claude message and keeps tool_result blocks at the front of the
+#     first user message even when user text is also present
+#   - Adds request-side regression tests for mixed Responses turns
 #
 diff --git a/internal/translator/claude/openai/chat-completions/claude_openai_request.go b/internal/translator/claude/openai/chat-completions/claude_openai_request.go
 index e9d8d35b..fb813cef 100644
@@ -135,41 +124,152 @@ index ead08d72..51086c53 100644
  	inputJSON := `{
  		"model": "gpt-4.1",
 diff --git a/internal/translator/claude/openai/responses/claude_openai-responses_request.go b/internal/translator/claude/openai/responses/claude_openai-responses_request.go
-index 514129ca..1a597acd 100644
+index 514129ca..63595108 100644
 --- a/internal/translator/claude/openai/responses/claude_openai-responses_request.go
 +++ b/internal/translator/claude/openai/responses/claude_openai-responses_request.go
-@@ -301,7 +301,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
+@@ -113,6 +113,95 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
+ 		return "toolu_" + b.String()
+ 	}
+ 
++	textContentPart := func(text string) string {
++		part := []byte(`{"type":"text","text":""}`)
++		part, _ = sjson.SetBytes(part, "text", text)
++		return string(part)
++	}
++
++	lastMessage := func() (int, gjson.Result, bool) {
++		msgs := gjson.GetBytes(out, "messages").Array()
++		lastIdx := len(msgs) - 1
++		if lastIdx < 0 {
++			return -1, gjson.Result{}, false
++		}
++		return lastIdx, msgs[lastIdx], true
++	}
++
++	messageContentBlocks := func(msg gjson.Result) []string {
++		content := msg.Get("content")
++		if content.IsArray() {
++			parts := content.Array()
++			blocks := make([]string, 0, len(parts))
++			for _, part := range parts {
++				blocks = append(blocks, part.Raw)
++			}
++			return blocks
++		}
++		if content.Type == gjson.String {
++			if text := content.String(); text != "" {
++				return []string{textContentPart(text)}
++			}
++		}
++		return []string{}
++	}
++
++	setMessageContentBlocks := func(messageIndex int, blocks []string) {
++		contentJSON := []byte(`[]`)
++		for _, block := range blocks {
++			contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(block))
++		}
++		out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content", messageIndex), contentJSON)
++	}
++
++	appendBlocksToLastMessage := func(role string, blocks []string) bool {
++		if len(blocks) == 0 {
++			return false
++		}
++		lastIdx, lastMsg, ok := lastMessage()
++		if !ok || lastMsg.Get("role").String() != role {
++			return false
++		}
++		existingBlocks := messageContentBlocks(lastMsg)
++		existingBlocks = append(existingBlocks, blocks...)
++		setMessageContentBlocks(lastIdx, existingBlocks)
++		return true
++	}
++
++	appendBlocksToLastUserToolResultMessage := func(blocks []string) bool {
++		if len(blocks) == 0 {
++			return false
++		}
++		lastIdx, lastMsg, ok := lastMessage()
++		if !ok || lastMsg.Get("role").String() != "user" {
++			return false
++		}
++		existingBlocks := messageContentBlocks(lastMsg)
++		if len(existingBlocks) == 0 || gjson.Parse(existingBlocks[0]).Get("type").String() != "tool_result" {
++			return false
++		}
++		existingBlocks = append(existingBlocks, blocks...)
++		setMessageContentBlocks(lastIdx, existingBlocks)
++		return true
++	}
++
++	insertToolResultIntoLastUserMessage := func(toolResult []byte) bool {
++		lastIdx, lastMsg, ok := lastMessage()
++		if !ok || lastMsg.Get("role").String() != "user" {
++			return false
++		}
++		existingBlocks := messageContentBlocks(lastMsg)
++		insertAt := 0
++		for insertAt < len(existingBlocks) && gjson.Parse(existingBlocks[insertAt]).Get("type").String() == "tool_result" {
++			insertAt++
++		}
++		existingBlocks = append(existingBlocks, "")
++		copy(existingBlocks[insertAt+1:], existingBlocks[insertAt:])
++		existingBlocks[insertAt] = string(toolResult)
++		setMessageContentBlocks(lastIdx, existingBlocks)
++		return true
++	}
++
+ 	// Model
+ 	out, _ = sjson.SetBytes(out, "model", modelName)
+ 
+@@ -279,6 +368,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
+ 					}
+ 				}
+ 
++				if role == "assistant" && appendBlocksToLastMessage(role, partsJSON) {
++					return true
++				}
++				if role == "user" && appendBlocksToLastUserToolResultMessage(partsJSON) {
++					return true
++				}
++
+ 				if len(partsJSON) > 0 {
+ 					msg := []byte(`{"role":"","content":[]}`)
+ 					msg, _ = sjson.SetBytes(msg, "role", role)
+@@ -294,6 +390,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
+ 					}
+ 					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+ 				} else if textAggregate.Len() > 0 || role == "system" {
++					textBlocks := []string{textContentPart(textAggregate.String())}
++					if role == "assistant" && appendBlocksToLastMessage(role, textBlocks) {
++						return true
++					}
++					if role == "user" && appendBlocksToLastUserToolResultMessage(textBlocks) {
++						return true
++					}
+ 					msg := []byte(`{"role":"","content":""}`)
+ 					msg, _ = sjson.SetBytes(msg, "role", role)
+ 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+@@ -301,7 +404,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
  				}
  
  			case "function_call":
 -				// Map to assistant tool_use
 +				// Map to assistant tool_use.
-+				// Consecutive function_calls are merged into a single assistant
-+				// message so that parallel tool calls share one turn.
++				// Merge into the current assistant turn so message text and
++				// parallel tool calls stay in a single Claude assistant message.
  				callID := item.Get("call_id").String()
  				if callID == "" {
  					callID = genToolCallID()
-@@ -319,21 +321,54 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
+@@ -319,21 +424,27 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
  					}
  				}
  
 -				asst := []byte(`{"role":"assistant","content":[]}`)
 -				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
 -				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
-+				msgs := gjson.GetBytes(out, "messages")
-+				lastIdx := len(msgs.Array()) - 1
-+				merged := false
-+				if lastIdx >= 0 {
-+					lastMsg := msgs.Array()[lastIdx]
-+					if lastMsg.Get("role").String() == "assistant" && lastMsg.Get("content").IsArray() {
-+						if lastMsg.Get("content.0.type").String() == "tool_use" {
-+							path := fmt.Sprintf("messages.%d.content.-1", lastIdx)
-+							out, _ = sjson.SetRawBytes(out, path, toolUse)
-+							merged = true
-+						}
-+					}
-+				}
-+				if !merged {
++				if !appendBlocksToLastMessage("assistant", []string{string(toolUse)}) {
 +					asst := []byte(`{"role":"assistant","content":[]}`)
 +					asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
 +					out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
@@ -178,9 +278,8 @@ index 514129ca..1a597acd 100644
  			case "function_call_output":
 -				// Map to user tool_result
 +				// Map to user tool_result.
-+				// Consecutive tool results are merged into a single user message
-+				// so that all tool_result blocks for a parallel tool_use turn
-+				// appear together, as required by the Claude API.
++				// Keep tool results in the first user message after tool_use,
++				// inserting them before any user text already accumulated.
  				callID := item.Get("call_id").String()
  				outputStr := item.Get("output").String()
  				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
@@ -190,20 +289,7 @@ index 514129ca..1a597acd 100644
 -				usr := []byte(`{"role":"user","content":[]}`)
 -				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
 -				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
-+				msgs := gjson.GetBytes(out, "messages")
-+				lastIdx := len(msgs.Array()) - 1
-+				merged := false
-+				if lastIdx >= 0 {
-+					lastMsg := msgs.Array()[lastIdx]
-+					if lastMsg.Get("role").String() == "user" && lastMsg.Get("content").IsArray() {
-+						if lastMsg.Get("content.0.type").String() == "tool_result" {
-+							path := fmt.Sprintf("messages.%d.content.-1", lastIdx)
-+							out, _ = sjson.SetRawBytes(out, path, toolResult)
-+							merged = true
-+						}
-+					}
-+				}
-+				if !merged {
++				if !insertToolResultIntoLastUserMessage(toolResult) {
 +					usr := []byte(`{"role":"user","content":[]}`)
 +					usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
 +					out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
@@ -211,3 +297,131 @@ index 514129ca..1a597acd 100644
  			}
  			return true
  		})
+diff --git a/internal/translator/claude/openai/responses/claude_openai-responses_request_test.go b/internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
+new file mode 100644
+index 00000000..7187a735
+--- /dev/null
++++ b/internal/translator/claude/openai/responses/claude_openai-responses_request_test.go
+@@ -0,0 +1,122 @@
++package responses
++
++import (
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestConvertOpenAIResponsesRequestToClaude_MergesMixedAssistantAndUserTurnsAroundTools(t *testing.T) {
++	inputJSON := `{
++		"model": "gpt-5.4",
++		"input": [
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use both tools."}]},
++			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I'll inspect both."}]},
++			{"type": "function_call", "call_id": "call_a", "name": "glob", "arguments": "{\"pattern\":\"*.go\"}"},
++			{"type": "function_call", "call_id": "call_b", "name": "read", "arguments": "{\"filePath\":\"README.md\"}"},
++			{"type": "function_call_output", "call_id": "call_a", "output": "glob result"},
++			{"type": "function_call_output", "call_id": "call_b", "output": "read result"},
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Now summarize."}]}
++		]
++	}`
++
++	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
++	resultJSON := gjson.ParseBytes(result)
++	messages := resultJSON.Get("messages").Array()
++
++	if len(messages) != 3 {
++		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
++	}
++
++	assistantMsg := messages[1]
++	if got := assistantMsg.Get("role").String(); got != "assistant" {
++		t.Fatalf("Expected assistant role, got %q", got)
++	}
++	assistantContent := assistantMsg.Get("content").Array()
++	if len(assistantContent) != 3 {
++		t.Fatalf("Expected 3 assistant content blocks, got %d. Content: %s", len(assistantContent), assistantMsg.Get("content").Raw)
++	}
++	if got := assistantContent[0].Get("type").String(); got != "text" {
++		t.Fatalf("Expected assistant content[0].type %q, got %q", "text", got)
++	}
++	if got := assistantContent[0].Get("text").String(); got != "I'll inspect both." {
++		t.Fatalf("Expected assistant text %q, got %q", "I'll inspect both.", got)
++	}
++	if got := assistantContent[1].Get("type").String(); got != "tool_use" {
++		t.Fatalf("Expected assistant content[1].type %q, got %q", "tool_use", got)
++	}
++	if got := assistantContent[1].Get("id").String(); got != "call_a" {
++		t.Fatalf("Expected first tool_use id %q, got %q", "call_a", got)
++	}
++	if got := assistantContent[2].Get("type").String(); got != "tool_use" {
++		t.Fatalf("Expected assistant content[2].type %q, got %q", "tool_use", got)
++	}
++	if got := assistantContent[2].Get("id").String(); got != "call_b" {
++		t.Fatalf("Expected second tool_use id %q, got %q", "call_b", got)
++	}
++
++	userMsg := messages[2]
++	if got := userMsg.Get("role").String(); got != "user" {
++		t.Fatalf("Expected user role, got %q", got)
++	}
++	userContent := userMsg.Get("content").Array()
++	if len(userContent) != 3 {
++		t.Fatalf("Expected 3 user content blocks, got %d. Content: %s", len(userContent), userMsg.Get("content").Raw)
++	}
++	if got := userContent[0].Get("type").String(); got != "tool_result" {
++		t.Fatalf("Expected user content[0].type %q, got %q", "tool_result", got)
++	}
++	if got := userContent[0].Get("tool_use_id").String(); got != "call_a" {
++		t.Fatalf("Expected first tool_result id %q, got %q", "call_a", got)
++	}
++	if got := userContent[1].Get("type").String(); got != "tool_result" {
++		t.Fatalf("Expected user content[1].type %q, got %q", "tool_result", got)
++	}
++	if got := userContent[1].Get("tool_use_id").String(); got != "call_b" {
++		t.Fatalf("Expected second tool_result id %q, got %q", "call_b", got)
++	}
++	if got := userContent[2].Get("type").String(); got != "text" {
++		t.Fatalf("Expected user content[2].type %q, got %q", "text", got)
++	}
++	if got := userContent[2].Get("text").String(); got != "Now summarize." {
++		t.Fatalf("Expected trailing user text %q, got %q", "Now summarize.", got)
++	}
++}
++
++func TestConvertOpenAIResponsesRequestToClaude_InsertsLateToolResultsBeforeUserText(t *testing.T) {
++	inputJSON := `{
++		"model": "gpt-5.4",
++		"input": [
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use the tool."}]},
++			{"type": "function_call", "call_id": "call_a", "name": "read", "arguments": "{}"},
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Continue after the tool result."}]},
++			{"type": "function_call_output", "call_id": "call_a", "output": "ok"}
++		]
++	}`
++
++	result := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
++	resultJSON := gjson.ParseBytes(result)
++	messages := resultJSON.Get("messages").Array()
++
++	if len(messages) != 3 {
++		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
++	}
++
++	userMsg := messages[2]
++	userContent := userMsg.Get("content").Array()
++	if len(userContent) != 2 {
++		t.Fatalf("Expected 2 user content blocks, got %d. Content: %s", len(userContent), userMsg.Get("content").Raw)
++	}
++	if got := userContent[0].Get("type").String(); got != "tool_result" {
++		t.Fatalf("Expected user content[0].type %q, got %q", "tool_result", got)
++	}
++	if got := userContent[0].Get("tool_use_id").String(); got != "call_a" {
++		t.Fatalf("Expected tool_result id %q, got %q", "call_a", got)
++	}
++	if got := userContent[1].Get("type").String(); got != "text" {
++		t.Fatalf("Expected user content[1].type %q, got %q", "text", got)
++	}
++	if got := userContent[1].Get("text").String(); got != "Continue after the tool result." {
++		t.Fatalf("Expected trailing user text %q, got %q", "Continue after the tool result.", got)
++	}
++}
