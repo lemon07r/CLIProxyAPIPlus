@@ -1,0 +1,217 @@
+#
+# Fixes OpenAI Responses → Chat Completions translator creating separate
+# assistant messages for each function_call. This caused downstream Claude
+# translators to see tool_use IDs without adjacent tool_result blocks.
+#
+# Root cause: ConvertOpenAIResponsesRequestToOpenAIChatCompletions emitted a
+# new `{"role":"assistant","tool_calls":[...]}` message for every function_call
+# item. Parallel tool calls and any preceding assistant text must instead be
+# merged into a single assistant message with multiple tool_calls entries.
+#
+# This is the actual fix for the OpenCode/Junie compact error:
+#   messages.N: `tool_use` ids were found without `tool_result` blocks
+#
+# Patch 011 fixed the Claude-direct translator path but the copilot executor
+# uses openai-response → openai (Responses → Chat Completions) translation,
+# which then feeds into the Claude chat-completions translator. The split
+# assistant messages broke the tool_use/tool_result adjacency requirement.
+#
+# Changes:
+#   - function_call items now merge into the previous assistant message when
+#     one exists, keeping text content and parallel tool_calls together
+#   - Adds request-side regression tests for parallel and multi-round tool calls
+#
+diff --git a/internal/translator/openai/openai/responses/openai_openai-responses_request.go b/internal/translator/openai/openai/responses/openai_openai-responses_request.go
+index 2366c9c3..8bfea61a 100644
+--- a/internal/translator/openai/openai/responses/openai_openai-responses_request.go
++++ b/internal/translator/openai/openai/responses/openai_openai-responses_request.go
+@@ -1,6 +1,7 @@
+ package responses
+ 
+ import (
++	"fmt"
+ 	"strings"
+ 
+ 	"github.com/tidwall/gjson"
+@@ -112,25 +113,29 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
+ 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+ 
+ 			case "function_call":
+-				// Handle function call conversion to assistant message with tool_calls
+-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+-
++				// Build the tool_call object.
+ 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+-
+ 				if callId := item.Get("call_id"); callId.Exists() {
+ 					toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
+ 				}
+-
+ 				if name := item.Get("name"); name.Exists() {
+ 					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+ 				}
+-
+ 				if arguments := item.Get("arguments"); arguments.Exists() {
+ 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
+ 				}
+ 
+-				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
+-				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
++				// Merge into the last assistant message so parallel tool calls
++				// and any preceding assistant text stay in a single message.
++				msgs := gjson.GetBytes(out, "messages").Array()
++				lastIdx := len(msgs) - 1
++				if lastIdx >= 0 && msgs[lastIdx].Get("role").String() == "assistant" {
++					out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.tool_calls.-1", lastIdx), toolCall)
++				} else {
++					assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
++					assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
++					out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
++				}
+ 
+ 			case "function_call_output":
+ 				// Handle function call output conversion to tool message
+diff --git a/internal/translator/openai/openai/responses/openai_openai-responses_request_test.go b/internal/translator/openai/openai/responses/openai_openai-responses_request_test.go
+new file mode 100644
+index 00000000..1603f2f0
+--- /dev/null
++++ b/internal/translator/openai/openai/responses/openai_openai-responses_request_test.go
+@@ -0,0 +1,138 @@
++package responses
++
++import (
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestConvertResponsesToChatCompletions_MergesFunctionCallsIntoSingleAssistantMessage(t *testing.T) {
++	inputJSON := `{
++		"model": "gpt-5",
++		"input": [
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Use both tools."}]},
++			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I'll inspect both."}]},
++			{"type": "function_call", "call_id": "call_a", "name": "glob", "arguments": "{\"pattern\":\"*.go\"}"},
++			{"type": "function_call", "call_id": "call_b", "name": "read", "arguments": "{\"filePath\":\"README.md\"}"},
++			{"type": "function_call_output", "call_id": "call_a", "output": "glob result"},
++			{"type": "function_call_output", "call_id": "call_b", "output": "read result"},
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Now summarize."}]}
++		]
++	}`
++
++	result := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", []byte(inputJSON), false)
++	r := gjson.ParseBytes(result)
++	msgs := r.Get("messages").Array()
++
++	// Expected: user, assistant(content + 2 tool_calls), tool, tool, user
++	if len(msgs) != 5 {
++		t.Fatalf("Expected 5 messages, got %d. Messages: %s", len(msgs), r.Get("messages").Raw)
++	}
++
++	assistantMsg := msgs[1]
++	if got := assistantMsg.Get("role").String(); got != "assistant" {
++		t.Fatalf("Expected assistant role, got %q", got)
++	}
++	toolCalls := assistantMsg.Get("tool_calls").Array()
++	if len(toolCalls) != 2 {
++		t.Fatalf("Expected 2 tool_calls in assistant message, got %d. Message: %s", len(toolCalls), assistantMsg.Raw)
++	}
++	if got := toolCalls[0].Get("id").String(); got != "call_a" {
++		t.Fatalf("Expected first tool_call id %q, got %q", "call_a", got)
++	}
++	if got := toolCalls[1].Get("id").String(); got != "call_b" {
++		t.Fatalf("Expected second tool_call id %q, got %q", "call_b", got)
++	}
++
++	// Assistant message should also retain the text content
++	content := assistantMsg.Get("content").Array()
++	if len(content) != 1 {
++		t.Fatalf("Expected 1 content block in assistant message, got %d", len(content))
++	}
++	if got := content[0].Get("text").String(); got != "I'll inspect both." {
++		t.Fatalf("Expected assistant text %q, got %q", "I'll inspect both.", got)
++	}
++
++	// Tool messages
++	if got := msgs[2].Get("role").String(); got != "tool" {
++		t.Fatalf("Expected tool role at index 2, got %q", got)
++	}
++	if got := msgs[2].Get("tool_call_id").String(); got != "call_a" {
++		t.Fatalf("Expected tool_call_id %q, got %q", "call_a", got)
++	}
++	if got := msgs[3].Get("role").String(); got != "tool" {
++		t.Fatalf("Expected tool role at index 3, got %q", got)
++	}
++	if got := msgs[3].Get("tool_call_id").String(); got != "call_b" {
++		t.Fatalf("Expected tool_call_id %q, got %q", "call_b", got)
++	}
++}
++
++func TestConvertResponsesToChatCompletions_FunctionCallsWithoutPrecedingAssistantText(t *testing.T) {
++	inputJSON := `{
++		"model": "gpt-5",
++		"input": [
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run both."}]},
++			{"type": "function_call", "call_id": "call_1", "name": "tool1", "arguments": "{}"},
++			{"type": "function_call", "call_id": "call_2", "name": "tool2", "arguments": "{}"},
++			{"type": "function_call_output", "call_id": "call_1", "output": "result1"},
++			{"type": "function_call_output", "call_id": "call_2", "output": "result2"}
++		]
++	}`
++
++	result := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", []byte(inputJSON), false)
++	r := gjson.ParseBytes(result)
++	msgs := r.Get("messages").Array()
++
++	// Expected: user, assistant(2 tool_calls), tool, tool
++	if len(msgs) != 4 {
++		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(msgs), r.Get("messages").Raw)
++	}
++
++	assistantMsg := msgs[1]
++	if got := assistantMsg.Get("role").String(); got != "assistant" {
++		t.Fatalf("Expected assistant role, got %q", got)
++	}
++	toolCalls := assistantMsg.Get("tool_calls").Array()
++	if len(toolCalls) != 2 {
++		t.Fatalf("Expected 2 tool_calls, got %d. Message: %s", len(toolCalls), assistantMsg.Raw)
++	}
++}
++
++func TestConvertResponsesToChatCompletions_MultipleToolRoundsStayCorrect(t *testing.T) {
++	inputJSON := `{
++		"model": "gpt-5",
++		"input": [
++			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Start"}]},
++			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Round 1"}]},
++			{"type": "function_call", "call_id": "c1", "name": "t1", "arguments": "{}"},
++			{"type": "function_call_output", "call_id": "c1", "output": "r1"},
++			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Round 2"}]},
++			{"type": "function_call", "call_id": "c2", "name": "t2", "arguments": "{}"},
++			{"type": "function_call_output", "call_id": "c2", "output": "r2"},
++			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]}
++		]
++	}`
++
++	result := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", []byte(inputJSON), false)
++	r := gjson.ParseBytes(result)
++	msgs := r.Get("messages").Array()
++
++	// Expected: user, assistant(text+tool_call), tool, assistant(text+tool_call), tool, assistant(text)
++	if len(msgs) != 6 {
++		t.Fatalf("Expected 6 messages, got %d. Messages: %s", len(msgs), r.Get("messages").Raw)
++	}
++
++	// First round assistant should have content + tool_call
++	if tc := msgs[1].Get("tool_calls").Array(); len(tc) != 1 || tc[0].Get("id").String() != "c1" {
++		t.Fatalf("First assistant missing tool_call c1: %s", msgs[1].Raw)
++	}
++	// Second round assistant should have content + tool_call
++	if tc := msgs[3].Get("tool_calls").Array(); len(tc) != 1 || tc[0].Get("id").String() != "c2" {
++		t.Fatalf("Second assistant missing tool_call c2: %s", msgs[3].Raw)
++	}
++	// Final assistant should have no tool_calls
++	if msgs[5].Get("tool_calls").Exists() && len(msgs[5].Get("tool_calls").Array()) > 0 {
++		t.Fatalf("Final assistant should have no tool_calls: %s", msgs[5].Raw)
++	}
++}
