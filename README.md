@@ -84,6 +84,7 @@ This fork applies the following patches on top of upstream at Docker build time 
 | 010 | Kimi K2.6 model support |
 | 011 | Merge parallel tool results into single Claude messages (fixes `tool_use` / `tool_result` pairing for agents like OpenCode and Junie) |
 | 012 | Merge parallel function_calls into single assistant message in Responses → Chat Completions translator (fixes tool adjacency error on copilot Claude path) |
+| 013 | Ensure `tool_use`/`tool_result` adjacency on Claude passthrough path (fixes compaction errors for native Claude clients like OpenCode with `@ai-sdk/anthropic`) |
 
 ## Getting Started
 

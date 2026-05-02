@@ -1,0 +1,294 @@
+#
+# Ensures tool_use/tool_result adjacency on the Claude-native passthrough path.
+#
+# When clients like OpenCode compact conversations via @ai-sdk/anthropic,
+# the resulting Claude messages can have tool_use blocks in an assistant
+# message without matching tool_result blocks in the immediately following
+# user message. Claude's API rejects this with:
+#   messages.N: tool_use ids were found without tool_result blocks immediately after
+#
+# This patch adds ensureToolResultAdjacency() which runs in both Execute
+# and ExecuteStream before sending to upstream. It:
+#   - Scans for assistant messages with tool_use blocks
+#   - Checks the next user message for matching tool_result blocks
+#   - If missing, reuses tool_result from elsewhere in the conversation
+#   - If not found anywhere, inserts a minimal placeholder
+#   - If no user message follows, inserts one
+#
+# This is the actual fix for the OpenCode/Junie compact tool_use error
+# on the claude→claude passthrough (no translation overhead).
+#
+diff --git a/internal/runtime/executor/claude_executor.go b/internal/runtime/executor/claude_executor.go
+index 66432ac4..30b1b8b3 100644
+--- a/internal/runtime/executor/claude_executor.go
++++ b/internal/runtime/executor/claude_executor.go
+@@ -186,6 +186,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
+ 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
+ 	body = normalizeCacheControlTTL(body)
+ 
++	body = ensureToolResultAdjacency(body)
++
+ 	// Extract betas from body and convert to header
+ 	var extraBetas []string
+ 	extraBetas, body = extractAndRemoveBetas(body)
+@@ -369,6 +371,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
+ 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
+ 	body = normalizeCacheControlTTL(body)
+ 
++	body = ensureToolResultAdjacency(body)
++
+ 	// Extract betas from body and convert to header
+ 	var extraBetas []string
+ 	extraBetas, body = extractAndRemoveBetas(body)
+@@ -701,6 +705,112 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
+ 	return betas, body
+ }
+ 
++// ensureToolResultAdjacency repairs Claude messages so every tool_use in an
++// assistant message has a matching tool_result in the immediately following
++// user message. Clients (e.g. OpenCode compaction) can produce conversations
++// with broken adjacency; this inserts any missing tool_results.
++func ensureToolResultAdjacency(body []byte) []byte {
++	messages := gjson.GetBytes(body, "messages")
++	if !messages.Exists() || !messages.IsArray() {
++		return body
++	}
++	msgArray := messages.Array()
++	n := len(msgArray)
++	if n == 0 {
++		return body
++	}
++
++	// Collect all existing tool_result blocks by ID for reuse.
++	toolResultsByID := make(map[string]string)
++	for _, msg := range msgArray {
++		if msg.Get("role").String() != "user" || !msg.Get("content").IsArray() {
++			continue
++		}
++		for _, block := range msg.Get("content").Array() {
++			if block.Get("type").String() == "tool_result" {
++				if id := block.Get("tool_use_id").String(); id != "" {
++					toolResultsByID[id] = block.Raw
++				}
++			}
++		}
++	}
++
++	modified := false
++	for i := 0; i < n; i++ {
++		if msgArray[i].Get("role").String() != "assistant" || !msgArray[i].Get("content").IsArray() {
++			continue
++		}
++		var toolUseIDs []string
++		for _, block := range msgArray[i].Get("content").Array() {
++			if block.Get("type").String() == "tool_use" {
++				if id := block.Get("id").String(); id != "" {
++					toolUseIDs = append(toolUseIDs, id)
++				}
++			}
++		}
++		if len(toolUseIDs) == 0 {
++			continue
++		}
++
++		nextIdx := i + 1
++		nextIsUser := nextIdx < n && msgArray[nextIdx].Get("role").String() == "user"
++
++		if !nextIsUser {
++			// Insert a new user message with all tool_results.
++			userMsg := []byte(`{"role":"user","content":[]}`)
++			for _, id := range toolUseIDs {
++				if raw, ok := toolResultsByID[id]; ok {
++					userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", []byte(raw))
++				} else {
++					tr, _ := sjson.SetBytes([]byte(`{"type":"tool_result","tool_use_id":"","content":"[result not available]"}`), "tool_use_id", id)
++					userMsg, _ = sjson.SetRawBytes(userMsg, "content.-1", tr)
++				}
++			}
++			newMsgs := []byte(`[]`)
++			for j := 0; j <= i; j++ {
++				newMsgs, _ = sjson.SetRawBytes(newMsgs, "-1", []byte(msgArray[j].Raw))
++			}
++			newMsgs, _ = sjson.SetRawBytes(newMsgs, "-1", userMsg)
++			for j := nextIdx; j < n; j++ {
++				newMsgs, _ = sjson.SetRawBytes(newMsgs, "-1", []byte(msgArray[j].Raw))
++			}
++			body, _ = sjson.SetRawBytes(body, "messages", newMsgs)
++			msgArray = gjson.GetBytes(body, "messages").Array()
++			n = len(msgArray)
++			modified = true
++			continue
++		}
++
++		// Next message is user -- add any missing tool_results.
++		presentIDs := make(map[string]bool)
++		if msgArray[nextIdx].Get("content").IsArray() {
++			for _, block := range msgArray[nextIdx].Get("content").Array() {
++				if block.Get("type").String() == "tool_result" {
++					presentIDs[block.Get("tool_use_id").String()] = true
++				}
++			}
++		}
++		for _, id := range toolUseIDs {
++			if presentIDs[id] {
++				continue
++			}
++			var tr []byte
++			if raw, ok := toolResultsByID[id]; ok {
++				tr = []byte(raw)
++			} else {
++				tr, _ = sjson.SetBytes([]byte(`{"type":"tool_result","tool_use_id":"","content":"[result not available]"}`), "tool_use_id", id)
++			}
++			body, _ = sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content.-1", nextIdx), tr)
++			modified = true
++		}
++		if modified {
++			msgArray = gjson.GetBytes(body, "messages").Array()
++			n = len(msgArray)
++		}
++	}
++	return body
++}
++
+ // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
+ // Anthropic API does not allow thinking when tool_choice is set to "any" or a specific tool.
+ // See: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations
+diff --git a/internal/runtime/executor/claude_executor_adjacency_test.go b/internal/runtime/executor/claude_executor_adjacency_test.go
+new file mode 100644
+index 00000000..9ea85630
+--- /dev/null
++++ b/internal/runtime/executor/claude_executor_adjacency_test.go
+@@ -0,0 +1,133 @@
++package executor
++
++import (
++	"testing"
++
++	"github.com/tidwall/gjson"
++)
++
++func TestEnsureToolResultAdjacency_NoOpWhenValid(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"tu1","name":"grep","input":{}}]},
++		{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"ok"}]},
++		{"role":"assistant","content":"done"}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	if len(msgs) != 4 {
++		t.Fatalf("expected 4 messages unchanged, got %d", len(msgs))
++	}
++}
++
++func TestEnsureToolResultAdjacency_InsertsMissingToolResult(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"tu1","name":"grep","input":{}}]},
++		{"role":"user","content":[{"type":"text","text":"thanks"}]}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	if len(msgs) != 3 {
++		t.Fatalf("expected 3 messages, got %d", len(msgs))
++	}
++	userContent := msgs[2].Get("content").Array()
++	foundToolResult := false
++	for _, block := range userContent {
++		if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == "tu1" {
++			foundToolResult = true
++		}
++	}
++	if !foundToolResult {
++		t.Fatalf("expected tool_result for tu1 in user message, got: %s", msgs[2].Get("content").Raw)
++	}
++}
++
++func TestEnsureToolResultAdjacency_InsertsUserMessageWhenMissing(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"grep","input":{}}]}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	if len(msgs) != 3 {
++		t.Fatalf("expected 3 messages (inserted user), got %d: %s", len(msgs), gjson.GetBytes(result, "messages").Raw)
++	}
++	if msgs[2].Get("role").String() != "user" {
++		t.Fatalf("expected inserted message to be user, got %q", msgs[2].Get("role").String())
++	}
++	if msgs[2].Get("content.0.type").String() != "tool_result" {
++		t.Fatalf("expected tool_result block, got: %s", msgs[2].Get("content").Raw)
++	}
++	if msgs[2].Get("content.0.tool_use_id").String() != "tu1" {
++		t.Fatalf("expected tool_use_id tu1, got %q", msgs[2].Get("content.0.tool_use_id").String())
++	}
++}
++
++func TestEnsureToolResultAdjacency_InsertsUserBetweenConsecutiveAssistants(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"grep","input":{}}]},
++		{"role":"assistant","content":"more text"},
++		{"role":"user","content":"bye"}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	if len(msgs) != 5 {
++		t.Fatalf("expected 5 messages, got %d: %s", len(msgs), gjson.GetBytes(result, "messages").Raw)
++	}
++	if msgs[2].Get("role").String() != "user" {
++		t.Fatalf("expected inserted user at index 2, got %q", msgs[2].Get("role").String())
++	}
++	if msgs[2].Get("content.0.tool_use_id").String() != "tu1" {
++		t.Fatalf("expected tool_result for tu1 in inserted message")
++	}
++}
++
++func TestEnsureToolResultAdjacency_ReusesExistingToolResultFromLater(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"grep","input":{}}]},
++		{"role":"user","content":[{"type":"text","text":"skip"}]},
++		{"role":"assistant","content":"mid"},
++		{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"real result"}]}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	// The tool_result should now also appear in msgs[2]
++	userContent := msgs[2].Get("content").Array()
++	found := false
++	for _, block := range userContent {
++		if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == "tu1" {
++			if block.Get("content").String() == "real result" {
++				found = true
++			}
++		}
++	}
++	if !found {
++		t.Fatalf("expected reused tool_result with 'real result' in msgs[2], got: %s", msgs[2].Get("content").Raw)
++	}
++}
++
++func TestEnsureToolResultAdjacency_ParallelToolUse(t *testing.T) {
++	body := []byte(`{"messages":[
++		{"role":"user","content":"hello"},
++		{"role":"assistant","content":[
++			{"type":"tool_use","id":"tu1","name":"grep","input":{}},
++			{"type":"tool_use","id":"tu2","name":"read","input":{}}
++		]},
++		{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"r1"}]}
++	]}`)
++	result := ensureToolResultAdjacency(body)
++	msgs := gjson.GetBytes(result, "messages").Array()
++	userContent := msgs[2].Get("content").Array()
++	ids := map[string]bool{}
++	for _, block := range userContent {
++		if block.Get("type").String() == "tool_result" {
++			ids[block.Get("tool_use_id").String()] = true
++		}
++	}
++	if !ids["tu1"] || !ids["tu2"] {
++		t.Fatalf("expected tool_results for both tu1 and tu2, got: %s", msgs[2].Get("content").Raw)
++	}
++}
